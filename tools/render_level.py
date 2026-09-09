@@ -142,10 +142,85 @@ def render_textured(level: Level, out_path: Path) -> tuple[int, int]:
     return drawn, untextured
 
 
+def render_entities(level: Level, out_path: Path) -> int:
+    """The textured map with the MAP entity records drawn on top, numbered."""
+    positions, _ = level.world_faces()
+    pts = np.asarray(positions)
+    lo, hi = pts.min(axis=0), pts.max(axis=0)
+    scale = RESOLUTION / max(hi[0] - lo[0], hi[2] - lo[2])
+
+    img, _ = _textured_image(level, pts, lo, scale)
+    fig, ax = plt.subplots(figsize=(13, 13), dpi=110)
+    ax.imshow(np.clip(img / 255.0, 0, 1))
+
+    def to_screen(x, z):
+        return (x - lo[0]) * scale, (z - lo[2]) * scale
+
+    for i, ent in enumerate(level.map.entities):
+        if ent.is_box:
+            cx, cy, cz = ent.cell
+            sx, _, sz = ent.size
+            # Boxes are grid cells; tile z is negative, so the cell runs -z..-(z+sz).
+            x0, z0 = to_screen(cx, -(cz + sz))
+            x1, z1 = to_screen(cx + sx, -cz)
+            colour = "red" if ent.is_spawn else "yellow"
+            ax.add_patch(plt.Rectangle((x0, z0), x1 - x0, z1 - z0, fill=False,
+                                       edgecolor=colour, linewidth=2.0))
+            tx, tz = (x0 + x1) / 2, (z0 + z1) / 2
+        else:
+            wx, _, wz = ent.position
+            tx, tz = to_screen(wx, wz)
+            colour = "red" if ent.is_spawn else "cyan"
+            ax.plot([tx], [tz], marker="o", markersize=7, color=colour,
+                    markeredgecolor="black")
+        ax.annotate(str(i), (tx, tz), color="white", fontsize=11, weight="bold",
+                    ha="center", va="center",
+                    bbox=dict(boxstyle="round,pad=0.15", fc="black", alpha=0.65))
+
+    boxes = sum(1 for e in level.map.entities if e.is_box)
+    ax.set_title(f"{level.name} - {len(level.map.entities)} entities "
+                 f"({boxes} boxes, {len(level.map.entities) - boxes} points); "
+                 f"red = spawn")
+    ax.set_axis_off()
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+    return len(level.map.entities)
+
+
+def _textured_image(level: Level, pts, lo, scale):
+    """Rasterise the level top-down and hand back the raw image."""
+    _, faces = level.world_faces()
+    pages = _page_images(level)
+    hi = pts.max(axis=0)
+    width = int((hi[0] - lo[0]) * scale) + 1
+    height = int((hi[2] - lo[2]) * scale) + 1
+    img = np.zeros((height, width, 3), np.float32)
+    zbuf = np.full((height, width), -1e9, np.float32)
+    drawn = 0
+    for indices, texture_id in faces:
+        if texture_id >= len(level.text.entries):
+            continue
+        entry = level.text.entries[texture_id]
+        page = pages[entry.page] if entry.has_texture else None
+        if page is None:
+            continue
+        corner = [pts[i] for i in indices]
+        screen = [((c[0] - lo[0]) * scale, (c[2] - lo[2]) * scale) for c in corner]
+        depths = [c[1] for c in corner]
+        uvs = level.face_uvs(texture_id)[:len(indices)]
+        fan = [(0, 1, 2), (0, 2, 3)] if len(indices) == 4 else [(0, 1, 2)]
+        for tri in fan:
+            _raster(img, zbuf, [screen[i] for i in tri], [uvs[i] for i in tri],
+                    [depths[i] for i in tri], page)
+        drawn += 1
+    return img, drawn
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("levels", nargs="+", help="level stem, e.g. t1l1m001")
-    ap.add_argument("--mode", choices=("height", "texture", "textured"),
+    ap.add_argument("--mode", choices=("height", "texture", "textured", "entities"),
                     default="textured", help="how to colour the map")
     args = ap.parse_args()
     OUT.mkdir(exist_ok=True)
@@ -160,7 +235,10 @@ def main() -> int:
               f"{nv} verts, {nf} textured faces")
         print(f"  bounds  X {lo[0]:7.2f}..{hi[0]:7.2f}   "
               f"Y {lo[1]:6.2f}..{hi[1]:6.2f}   Z {lo[2]:7.2f}..{hi[2]:7.2f}")
-        if args.mode == "textured":
+        if args.mode == "entities":
+            n = render_entities(level, png)
+            print(f"  drew {n} entity records over the map")
+        elif args.mode == "textured":
             drawn, untextured = render_textured(level, png)
             print(f"  rasterised {drawn} faces, {untextured} carry no texture")
         else:
