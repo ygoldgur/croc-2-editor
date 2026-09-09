@@ -13,6 +13,8 @@ Working:
 - `LGHT` fully decoded
 - `MAP` fully walked — every section consumed exactly on all 75 parseable levels
 - `MAP` zone records: fog, camera angle, music and reverb, confirmed in-game
+- `STPC` structure: object models (same format as `TRAK`), animation, and the
+  object list - object and script names extractable per level
 - `WFPC` explained: it is the per-level flag word gating four optional `MAP` sections
 - `TRAK` meshes decoded — vertices, normals, triangles, face normals, bounding boxes
 - `TEXT` decoded — texture pages and the atlas table
@@ -25,8 +27,8 @@ Working:
 
 Blocked or untouched:
 
-- Where objects and actors are actually placed. The `MAP` zone list is not it,
-  and no chunk decoded so far holds them; `STPC` is the remaining candidate
+- The binary layout of the `STPC` object list. Names come out by scanning, but
+  object positions, types and links are still unread
 - `STPC`: known to be a relocatable blob the `MAP` entities point into by byte offset,
   and known not to be scripts, but its internal layout is undecoded
 - `t0i0m006` and `t0l1m002` use a `TRAK` variant we reject
@@ -69,7 +71,8 @@ croc2/          format library
   paths.py      where the game data lives
 tools/          roundtrip, survey, render_level, render3d, mod_menu, wadinfo,
                 mapwalk (walks MAP section by section, checks it consumes exactly),
-                zones (surveys the MAP zone records), mod_zone (fog test)
+                zones (surveys the MAP zone records), mod_zone (fog test),
+                stpcwalk (walks STPC; --names lists a level's objects)
 game/pristine/  verified untouched disc copy
 game/cd/        what the game reads
 game/backup/    original save file

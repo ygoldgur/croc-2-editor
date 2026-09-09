@@ -399,22 +399,82 @@ rectangle whose corners the face's corners map onto.
 46,524 entries; `0xFF` marks a face with no texture (7,191 of them game-wide). The
 fourth byte is `0xFF` throughout.
 
-## STPC — largest chunk, contents unknown
+## STPC — object models, animation, and the object list
 
-Often described as holding scripts, on the strength of the name alone; the community
-doc that says so marks it "probably". Nothing verifies it yet, and what can be measured
-does not obviously support it:
+The largest chunk, 0.5 to 2.7 MB per level. It is not read field by field. The loader
+(`FUN_00421f40`) allocates the whole chunk, reads it in one `fread`, and then walks it
+patching internal pointers, so every apparent "allocation" is a bump of a cursor through
+the blob itself. `tools/stpcwalk.py` replays that cursor arithmetic.
 
-- 0.5 to 2.7 MB per level, far more than scripts would need
-- level-specific: `t1l1m001` and `t2l1m001` share no common prefix at all, and only
-  6.2% of 512-byte blocks occur in more than one level
-- no text of any kind; entropy is 6.5 bits/byte and the byte histogram clusters at
-  0x3D-0x3F, the high bytes of small IEEE floats
+```
+uint32 n_models
+n_models * { 0x88-byte header, then that model's arrays }
+uint32 n_animations
+n_animations * { 0x20-byte header, then that record's arrays }
+[0x100] uint32 n_groups, then batched model groups
+<object list>                     names and per-object data; not decoded
+```
 
-That profile fits per-level model and animation data much better than bytecode. A
-script section could still be embedded in it. `Croc2.exe` contains no strings naming
-opcodes, script files or a compiler, which is weak evidence either way, since a
-numeric-opcode interpreter needs no strings.
+Headers and their arrays alternate, one model at a time, because the loader calls its
+fixup helper once per record. Only the flag-gated third section passes a batch, and
+there the headers are contiguous.
+
+### The models are TRAK meshes
+
+`FUN_00424db0` walks 0x88-byte headers whose sub-arrays are 24, 28 and 44 bytes, read
+from counts at `+0x6c`, `+0x6e` and `+0x78`/`+0x7a`. Those are exactly the sizes, at
+exactly the offsets, of the terrain meshes in `TRAK`:
+
+```
++0x6c  uint16 vertex_count     -> vertex_count * 24    position + normal
++0x6e  uint16 triangle_count   -> triangle_count * 28  the render triangles
++0x78  uint16 quad_count
++0x7a  uint16 extra_count      -> (quad + extra) * 44  render faces
++0x82  uint16 count            -> count * 2            an extra array TRAK has no room for
+```
+
+This also explains something left dangling in the `TRAK` notes: the two `uint32` zeros
+at `+0x70` and `+0x74` in every terrain model header. They are pointer slots, and this
+is the code that fills them. `STPC`'s header is eight bytes longer than `TRAK`'s to fit
+the extra array and its pointer.
+
+So the object meshes are in the same format as the terrain meshes, and the existing
+`TRAK` decoder should read them with only the header size changed.
+
+`FUN_00424ef0` walks the second section: 0x20-byte headers with nested per-item arrays
+ending in 64-byte blocks, which is the shape of animation data.
+
+### The object list
+
+The walk above stops short of the end of the chunk — by 12-19% on levels where the
+`0x100` flag is clear, and only 1-6% where it is set. The remainder is a section the
+loader does not relocate unless that flag is on. Nothing follows it, so skipping it
+costs the loader no alignment.
+
+That remainder holds **the object and actor list**, as plain nul-terminated names padded
+with `0xcd` (MSVC's uninitialised-memory fill). Sailor Village's:
+
+```
+WalkingCroc      CameraPC              Gobbo King 1        trampoline
+tramp collider   Trampoline Gobbo      Clipboard Gobbo     Reward Gobbo
+Topdialog off    setting level flag 6  Smash Box toolbox   Gobbo Says
+Hub 1 Heart Pot  Distressed Gobbo      EmptyBoat           Bubbles
+CBKDoorTrigger   Throwable Gobbo Pickup                    Croc Splash
+```
+
+631 distinct names across the game. Some are actors (`Golden Gobbo`, `BambooCage`,
+`HeartFountain`), and some are unmistakably **script or trigger logic**: `setting level
+flag 6`, `Topdialog off`, `GGWaitForCroc`, `bonusroomwarp`, `level flag 2 was set`,
+`lll open` / `lll not open`. That settles the long-open question of whether level logic
+is data or hard-coded: named, per-level, and shipped in the WAD.
+
+The binary layout of these records is **not** decoded. Names sit at irregular intervals
+inside variable-size blocks, so `tools/stpcwalk.py --names` extracts them by scanning,
+not by parsing. Positions, types and links are still unknown.
+
+The old guess that this chunk was "probably scripts" was half right in a way that would
+have been misleading: the bulk of it is models and animation, and the logic is a list of
+named objects in the tail, not bytecode.
 
 ## Level addressing
 
