@@ -142,8 +142,8 @@ def render_textured(level: Level, out_path: Path) -> tuple[int, int]:
     return drawn, untextured
 
 
-def render_entities(level: Level, out_path: Path) -> int:
-    """The textured map with the MAP entity records drawn on top, numbered."""
+def render_zones(level: Level, out_path: Path) -> int:
+    """The textured map with the MAP zone records drawn on top, numbered."""
     positions, _ = level.world_faces()
     pts = np.asarray(positions)
     lo, hi = pts.min(axis=0), pts.max(axis=0)
@@ -156,36 +156,36 @@ def render_entities(level: Level, out_path: Path) -> int:
     def to_screen(x, z):
         return (x - lo[0]) * scale, (z - lo[2]) * scale
 
-    for i, ent in enumerate(level.map.entities):
-        if ent.is_box:
-            cx, cy, cz = ent.cell
-            sx, _, sz = ent.size
+    for i, zone in enumerate(level.map.zones):
+        if zone.is_box:
+            cx, cy, cz = zone.cell
+            sx, _, sz = zone.size
             # Boxes are grid cells; tile z is negative, so the cell runs -z..-(z+sz).
             x0, z0 = to_screen(cx, -(cz + sz))
             x1, z1 = to_screen(cx + sx, -cz)
-            colour = "red" if ent.is_spawn else "yellow"
+            colour = "red" if zone.is_default else "yellow"
             ax.add_patch(plt.Rectangle((x0, z0), x1 - x0, z1 - z0, fill=False,
                                        edgecolor=colour, linewidth=2.0))
             tx, tz = (x0 + x1) / 2, (z0 + z1) / 2
         else:
-            wx, _, wz = ent.position
+            wx, _, wz = zone.position
             tx, tz = to_screen(wx, wz)
-            colour = "red" if ent.is_spawn else "cyan"
+            colour = "red" if zone.is_default else "cyan"
             ax.plot([tx], [tz], marker="o", markersize=7, color=colour,
                     markeredgecolor="black")
         ax.annotate(str(i), (tx, tz), color="white", fontsize=11, weight="bold",
                     ha="center", va="center",
                     bbox=dict(boxstyle="round,pad=0.15", fc="black", alpha=0.65))
 
-    boxes = sum(1 for e in level.map.entities if e.is_box)
-    ax.set_title(f"{level.name} - {len(level.map.entities)} entities "
-                 f"({boxes} boxes, {len(level.map.entities) - boxes} points); "
-                 f"red = spawn")
+    boxes = sum(1 for e in level.map.zones if e.is_box)
+    ax.set_title(f"{level.name} - {len(level.map.zones)} environment zones "
+                 f"({boxes} boxes, {len(level.map.zones) - boxes} points); "
+                 f"red = default zone")
     ax.set_axis_off()
     fig.tight_layout()
     fig.savefig(out_path)
     plt.close(fig)
-    return len(level.map.entities)
+    return len(level.map.zones)
 
 
 def _textured_image(level: Level, pts, lo, scale):
@@ -220,7 +220,7 @@ def _textured_image(level: Level, pts, lo, scale):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("levels", nargs="+", help="level stem, e.g. t1l1m001")
-    ap.add_argument("--mode", choices=("height", "texture", "textured", "entities"),
+    ap.add_argument("--mode", choices=("height", "texture", "textured", "zones"),
                     default="textured", help="how to colour the map")
     args = ap.parse_args()
     OUT.mkdir(exist_ok=True)
@@ -235,9 +235,9 @@ def main() -> int:
               f"{nv} verts, {nf} textured faces")
         print(f"  bounds  X {lo[0]:7.2f}..{hi[0]:7.2f}   "
               f"Y {lo[1]:6.2f}..{hi[1]:6.2f}   Z {lo[2]:7.2f}..{hi[2]:7.2f}")
-        if args.mode == "entities":
-            n = render_entities(level, png)
-            print(f"  drew {n} entity records over the map")
+        if args.mode == "zones":
+            n = render_zones(level, png)
+            print(f"  drew {n} zone records over the map")
         elif args.mode == "textured":
             drawn, untextured = render_textured(level, png)
             print(f"  rasterised {drawn} faces, {untextured} carry no texture")

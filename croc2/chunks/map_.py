@@ -43,7 +43,7 @@ class Tile:
                                 self.rotation, self.model_id, self.flags)
 
 
-ENTITY_SIZE = 90  # 92 bytes once the loader scatters it into its struct
+ZONE_SIZE = 90  # 92 bytes once the loader scatters it into its struct
 
 BOX_BITS = 0x0C   # either of these means the record is a grid box, not a point
 SPAWN_BIT = 0x08  # exactly one record per level carries it
@@ -51,8 +51,8 @@ ANGLE_MASK = 0xF00
 
 
 @dataclass
-class Entity:
-    """One object placement from the MAP entity list.
+class Zone:
+    """One environment zone from the MAP zone list.
 
     A record is either a box on the tile grid or a point in the world, and the low
     byte of ``flags`` says which. The two readings share the same three fields, so
@@ -61,11 +61,25 @@ class Entity:
 
     raw: bytearray
 
-    def word(self, off: int) -> int:
-        return struct.unpack_from("<I", self.raw, off)[0]
+    # Memory offset -> (file offset, width). The 90 file bytes scatter into a 92-byte
+    # struct because of the uint16 at +0x38, so the two stop agreeing after it. Fields
+    # are addressed by memory offset here, to match the game's own code.
+    FIELDS = {
+        0x00: (0, 4), 0x04: (4, 4), 0x08: (8, 4), 0x0C: (12, 4),
+        0x10: (16, 4), 0x14: (20, 4), 0x18: (24, 4), 0x1C: (28, 4),
+        0x20: (32, 4), 0x24: (36, 4), 0x28: (40, 4), 0x2C: (44, 4),
+        0x30: (48, 4), 0x34: (52, 4), 0x38: (56, 2), 0x3C: (58, 4),
+        0x40: (62, 4), 0x44: (66, 4), 0x48: (70, 4), 0x4C: (74, 4),
+        0x50: (78, 4), 0x54: (82, 2), 0x56: (84, 2), 0x58: (86, 4),
+    }
 
-    def set_word(self, off: int, value: int) -> None:
-        struct.pack_into("<I", self.raw, off, value)
+    def word(self, mem_off: int) -> int:
+        off, width = self.FIELDS[mem_off]
+        return struct.unpack_from("<H" if width == 2 else "<I", self.raw, off)[0]
+
+    def set_word(self, mem_off: int, value: int) -> None:
+        off, width = self.FIELDS[mem_off]
+        struct.pack_into("<H" if width == 2 else "<I", self.raw, off, value)
 
     def set_cell(self, x: int, y: int, z: int) -> None:
         for off, value in zip((0, 4, 8), (x, y, z)):
@@ -80,7 +94,7 @@ class Entity:
         return bool(self.flags & BOX_BITS)
 
     @property
-    def is_spawn(self) -> bool:
+    def is_default(self) -> bool:
         return bool(self.flags & SPAWN_BIT)
 
     @property
@@ -99,12 +113,44 @@ class Entity:
     @property
     def cell(self) -> tuple[int, int, int]:
         """Grid origin. Only meaningful for a box."""
-        return self.word(0), self.word(4), self.word(8)
+        return self.word(0x00), self.word(0x04), self.word(0x08)
 
     @property
     def size(self) -> tuple[int, int, int]:
         """Box extent in grid cells. Only meaningful for a box."""
-        return self.word(12), self.word(16), self.word(20)
+        return self.word(0x0C), self.word(0x10), self.word(0x14)
+
+    # Environment settings, applied by FUN_00423ce0 whenever this zone becomes
+    # the active one. The names come from what that function does with them.
+
+    @property
+    def fog_near(self) -> float:
+        return self.word(0x3C) / 4096.0
+
+    @property
+    def fog_far(self) -> float:
+        return self.word(0x40) / 4096.0
+
+    @property
+    def fog_colour(self) -> tuple[int, int, int]:
+        v = self.word(0x4C)
+        return (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF
+
+    @fog_colour.setter
+    def fog_colour(self, rgb: tuple[int, int, int]) -> None:
+        r, g, b = rgb
+        self.set_word(0x4C, (r << 16) | (g << 8) | b)
+
+    @property
+    def music_track(self) -> int:
+        """Track id, or 0 for none."""
+        return self.word(0x58)
+
+    @property
+    def reverb(self) -> tuple[int, int]:
+        """(type 0-15, level 0-127), as split by ADS_SetReverb."""
+        v = self.word(0x56)
+        return v & 0xF, (v >> 8) & 0x7F
 
     @property
     def position(self) -> tuple[float, float, float]:
@@ -129,9 +175,9 @@ class MapChunk:
     grid_x: int
     grid_z: int
     tiles: list[Tile]
-    entities: list[Entity]
+    zones: list[Zone]
     rest: bytes = b""  # sections after the tile array, kept verbatim
-    entities_at: int = -1  # where the entity list starts within rest
+    zones_at: int = -1  # where the zone list starts within rest
 
     @classmethod
     def parse(cls, data: bytes) -> "MapChunk":
@@ -140,21 +186,21 @@ class MapChunk:
         tiles = [Tile(*TILE_STRUCT.unpack_from(data, off))
                  for off in range(HEADER_STRUCT.size, end, TILE_STRUCT.size)]
         rest = data[end:]
-        entities, at = cls._entities(rest)
-        return cls(grid_x, grid_z, tiles, entities, rest, at)
+        zones, at = cls._zones(rest)
+        return cls(grid_x, grid_z, tiles, zones, rest, at)
 
     @staticmethod
-    def _entities(rest: bytes) -> tuple[list[Entity], int]:
+    def _zones(rest: bytes) -> tuple[list[Zone], int]:
         """The entity list is the second section after the tiles."""
         try:
             leading = struct.unpack_from("<I", rest, 0)[0]
             at = 4 + leading * 4
             count = struct.unpack_from("<I", rest, at)[0]
             at += 4
-            if at + count * ENTITY_SIZE > len(rest):
+            if at + count * ZONE_SIZE > len(rest):
                 return [], -1
-            return ([Entity(bytearray(rest[at + i * ENTITY_SIZE:
-                                           at + (i + 1) * ENTITY_SIZE]))
+            return ([Zone(bytearray(rest[at + i * ZONE_SIZE:
+                                           at + (i + 1) * ZONE_SIZE]))
                      for i in range(count)], at)
         except struct.error:
             return [], -1
@@ -165,11 +211,11 @@ class MapChunk:
         return out + self._rest_bytes()
 
     def _rest_bytes(self) -> bytes:
-        """rest, with any entity edits spliced back in."""
-        if self.entities_at < 0 or not self.entities:
+        """rest, with any zone edits spliced back in."""
+        if self.zones_at < 0 or not self.zones:
             return self.rest
         rest = bytearray(self.rest)
-        for i, ent in enumerate(self.entities):
-            at = self.entities_at + i * ENTITY_SIZE
-            rest[at:at + ENTITY_SIZE] = ent.raw
+        for i, zone in enumerate(self.zones):
+            at = self.zones_at + i * ZONE_SIZE
+            rest[at:at + ZONE_SIZE] = zone.raw
         return bytes(rest)

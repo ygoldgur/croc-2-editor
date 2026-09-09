@@ -69,7 +69,7 @@ smaller than the in-memory struct the loader scatters them into:
 
 ```
 uint32 n, n * uint32                    small leading array; 20 in Sailor Village
-uint32 n, n * 90 bytes                  entity records - see below (92 bytes in memory)
+uint32 n, n * 90 bytes                  environment zones - see below (92 in memory)
 uint32 n, n * 30 bytes                  40-byte struct in memory
 256 bytes                               fixed: 32 pairs of uint32
 grid_x * grid_z * uint32                one word per grid cell
@@ -145,37 +145,108 @@ per-face UV rotation that does not exist.
 
 Confirmed writable — editing tile `y` moves geometry in the running game.
 
-## MAP entity records — object and actor placement
+## MAP zone records — fog, camera, music and reverb
 
-The second section of the tail is the object list: 518 records across the 75 levels,
-90 bytes each in the file, 92 in memory. Sailor Village has 14, the largest level 44,
-and 33 levels have exactly one.
+The second section of the tail is the level's environment zones: 520 records across all
+77 levels, 90 bytes each in the file, 92 in memory. Sailor Village has 14, the largest
+level 44, and 33 levels have exactly one.
+
+**These are not object or actor placements.** They were read that way at first, and the
+game disproved it — see the dead end at the end of this section.
+
+Fields are numbered by their offset in the 92-byte struct, not in the file; the two stop
+agreeing after the `uint16` at `+0x38`.
 
 ```
-+0x00  uint32   grid x
-+0x04  uint32
-+0x08  uint32   grid z
-+0x0c  uint32   always 1 so far
-+0x10  uint32   parameter; meaning appears to depend on the object
-+0x14  uint32
++0x00  uint32   grid x        \
++0x04  uint32   grid y         | box origin, in cells
++0x08  uint32   grid z        /
++0x0c  uint32   size x        \
++0x10  uint32   size y         | box extent in cells, when the record is a box
++0x14  uint32   size z        /
 +0x18  uint32
 +0x1c  uint32
-+0x20  uint32   flags: rotation in the high nibbles, bit 8 marks the spawn
++0x20  uint32   flags: rotation in the high nibbles, bits 2 and 3 select box vs point
 +0x24  uint32
 +0x28  uint32   byte offset into the level's STPC blob, or 0
-... 46 further bytes, mostly constant within a level
++0x2c  uint32
++0x30  uint32
++0x34  uint32   copied to a global, values 0..3
++0x38  uint16
++0x3c  uint32   fog near, 4.12 fixed point
++0x40  uint32   fog far,  4.12 fixed point
++0x44  uint32   a second near, usually equal to +0x3c
++0x48  uint32   a second far,  usually equal to +0x40
++0x4c  uint32   fog colour, 0x00RRGGBB
++0x50  uint32   passed to FUN_00454da0
++0x54  uint16   always 0
++0x56  uint16   reverb: type in bits 0-3, level in bits 8-14
++0x58  uint32   music track id, or 0 for none
 ```
 
-Two independent checks pin this down. **All 518 records place `+0x00` inside their own
-level's `grid_x` and `+0x08` inside `grid_z`** — on grids as small as 32x32, with no
-exceptions, so those two fields are grid coordinates. And **exactly one record per level
-has bit 8 of the flags set, in all 75 levels**; that is the record the loader copies into
-a global of its own, which is what a player spawn point looks like.
+The environment fields come straight from `FUN_00423ce0`, which applies a zone when it
+becomes the active one:
 
-The rotation sits in the same 12-bit binary angle as the tiles, but objects use a finer
+```
+_DAT_004b4238 = rec[+0x3c] * 0.00024414062          // 1/4096, so 4.12 fixed point
+_DAT_004b423c = rec[+0x40] * 0.00024414062
+_DAT_004b4244 = 1.0 / (far - near)                  // the usual fog scale
+FUN_004209d0(rec[+0x4c] >> 16, >> 8, rec[+0x4c], 0xff)   // r, g, b, a
+FUN_0047b190(rec[+0x58], 0)                              // start music track
+_ADS_SetReverb_8(rec[+0x56] & 0xf, rec[+0x56] >> 8 & 0x7f)
+```
+
+The same function rebuilds the camera — angles converted with `* PI/180`, and near/far
+planes taken from the fog range. That is what the per-zone rotation is for: Croc 2 swings
+its camera to a fixed angle per area, and the zone carries that angle.
+
+Confirmed in the game. Setting every Sailor Village zone to white fog at 1.0..5.0 instead
+of grey at 6.0..9.0 made the level, in the tester's words, "foggier than London".
+
+Three things agree with the reading independently:
+
+- **Fog near is below fog far in all 520 records**, with no exceptions.
+- **Every fog colour is greyscale**, R = G = B in all 520. That explains an otherwise
+  strange branch in the loader, which forces the colour to grey off its green byte when
+  a global flag is clear.
+- Music ids span 0..46 with 44 distinct values, and reverb splits into a type of 0..8
+  and a level of 0..24 — both plausible ranges for what the calls do with them.
+
+### Box or point
+
+The low byte of `+0x20` picks how to read `+0x0c`/`+0x10`/`+0x14`. With bit 2 or bit 3
+set the record is a box on the tile grid and those fields are its extent in cells;
+otherwise they are a world position in 4.12 fixed point, with z negated to match the
+tiles' negative z.
+
+The split holds up on the data. Counting over the 75 levels that fully parse: of the
+335 point records, **every one** puts x and z on
+half-unit boundaries and 98% land inside their own level's terrain — against 0% if z is
+left unnegated. Of the 183 box records, 94-100% give a box that fits inside the grid.
+
+Exactly one record per level has bit 3 set, in all 75 levels. That is the record the
+loader copies into a global of its own, and `FUN_00423ce0` reads that global — so it is
+the level's **default zone**, applied at load.
+
+The rotation sits in the same 12-bit binary angle as the tiles, but zones use a finer
 step: 505 of 518 records are on the 90-degree marks `0x000/0x400/0x800/0xc00`, and the
-remaining 13 sit on `0x200` boundaries, so entities can face 45 degrees where tiles
+remaining 13 sit on `0x200` boundaries, so a zone camera can face 45 degrees where a tile
 cannot.
+
+### Dead end: these are not spawns
+
+Bit 3 marking exactly one record per level, and that record being copied into a global,
+looked exactly like a player spawn point. It is not, and the check that caught it was
+cheap: move the record and launch the game.
+
+Moving Sailor Village's flagged record from cell (3,1,0) to (10,0,17), on the far side of
+the map, changed nothing about where Croc arrives. Only then did chasing the readers of
+that global turn up `ADS_SetReverb` and the fog maths.
+
+Worth keeping in mind for the rest of the tail: 43 of 77 of these flagged records sit off
+the terrain entirely, clustered at small x with z = 0, which is fine for a default zone
+but should have been a warning against reading them as positions. A "one per level,
+stashed in a global" signature says a record is *distinguished*, not what it means.
 
 ### These records are not named
 
