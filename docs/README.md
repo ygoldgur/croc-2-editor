@@ -34,6 +34,18 @@ the default corner assignment on 90-98% of wall faces — and the trailing float
 +0x18 is continuous, with 24,592 distinct values, so it is a plane offset rather than
 an orientation index.
 
+Ghidra runs in a container, so the host needs no JDK and nothing lands in the repo:
+
+```sh
+./ghidra/run.sh          # first run imports and analyses, ~2 min; then runs the script
+```
+
+It mounts `Croc2.exe` read-only, caches the analysed project in `ghidra/project/`, and
+writes `ghidra/out/decompiled.c` — 872 functions, all of them, which is small enough to
+grep. Chunk ids appear in the code as 32-bit immediates (`MAP ` is `0x4d415020`), and
+searching for one leads straight to its loader. Set `CROC2_EXE` if your install differs.
+The image is pinned to amd64: Ghidra ships no arm64 decompiler, so it runs emulated.
+
 The technique that has worked is finding a claim about a field that the data can
 falsify on its own — a normal must match the geometry it belongs to, an index must
 stay inside its table and be dense, tiles must seam together into a continuous

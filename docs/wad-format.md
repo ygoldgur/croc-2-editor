@@ -48,15 +48,52 @@ matches the `point_lights` structure CrocUtils documents for Croc 1.
 
 ## MAP — terrain tile placement
 
-Header plus a tile array; everything after the array is UNKNOWN.
+Not a tile array followed by a blob. The loader (`FUN_00422020`, reached from the chunk
+dispatcher at `0x0048e5xx`) reads `MAP` as a **sequence of sections**, one field at a
+time, through three `fread` wrappers that give every field's width away:
+
+```
+FUN_00418750   fread(dst, 1, 1, f)    1 byte
+FUN_00418770   fread(dst, 2, 1, f)    2 bytes
+FUN_00418790   fread(dst, 4, 1, f)    4 bytes
+```
+
+Sections after the tile array, in read order, as far as the decompilation has been
+walked (the middle of the function is long and not yet fully transcribed):
+
+```
+uint32 n, n * uint32                    the small leading array; 20 in Sailor Village
+uint32 n, n * 90 bytes                  92-byte struct in memory; field at +0x28 is
+                                        relocated against a string base, so these
+                                        records are named - the actor candidates
+uint32 n, n * 30 bytes                  40-byte struct in memory
+256 bytes                               fixed: 32 pairs of uint32
+grid_x * grid_z * uint32                one word per grid cell
+tile_count * 24 bytes
+tile_count * uint32
+...                                     further sections, not yet transcribed
+uint32 n, n * 48 bytes                  read byte by byte
+uint32 n, uint32, n * 64-byte structs   entries cross-reference earlier sections
+...                                     two sections gated on global feature flags
+uint16                                  final field
+```
+
+Earlier statistical guesses at this region were wrong. A column-entropy scan and an
+autocorrelation probe both suggested a uniform 180-byte record, which the code shows
+does not exist; the apparent period came from several different sections interleaving.
+Nothing here should be trusted until the parser walks the whole chunk and consumes it
+exactly, the same test that validated `TRAK`.
+
+The header and tile array are confirmed against the code:
 
 ```
 uint32 tile_count
 uint32 grid_x, grid_z        world grid extents; 4..128, not always square
 per tile (24 bytes):
   float  x, y, z             world position, 1.0 grid at .5 offsets
-  uint32 rotation            0x000 / 0x400 / 0x800 / 0xC00 = 0/90/180/270 degrees,
-                             anticlockwise about +Y seen from above
+  uint32 rotation            masked with 0xff0 by the loader, which then computes
+                             degrees = rotation / 4096 * 360, confirming the 0x1000
+                             full turn; anticlockwise about +Y seen from above
   uint32 model_id            index into TRAK
   uint32 flags               0 or 1
 <UNKNOWN tail>               actor/object instances live here
