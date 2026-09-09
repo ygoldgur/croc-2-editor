@@ -58,31 +58,60 @@ FUN_00418770   fread(dst, 2, 1, f)    2 bytes
 FUN_00418790   fread(dst, 4, 1, f)    4 bytes
 ```
 
-Sections after the tile array, in read order, as far as the decompilation has been
-walked (the middle of the function is long and not yet fully transcribed):
+The whole chunk is now accounted for. `tools/mapwalk.py` transcribes the loader's read
+order and **consumes all 75 parseable levels' `MAP` chunks to the last byte**; the only
+failures are `t0i0m006` and `t0l1m002`, the same two demo maps that already fail `TRAK`.
+That exact-consumption test is what makes the layout below trustworthy rather than a
+guess, and it is the same test that validated `TRAK`.
+
+Sections after the tile array, in read order. Sizes are **file** bytes, which are often
+smaller than the in-memory struct the loader scatters them into:
 
 ```
-uint32 n, n * uint32                    the small leading array; 20 in Sailor Village
-uint32 n, n * 90 bytes                  92-byte struct in memory; field at +0x28 is
-                                        relocated against a string base, so these
-                                        records are named - the actor candidates
+uint32 n, n * uint32                    small leading array; 20 in Sailor Village
+uint32 n, n * 90 bytes                  entity records - see below (92 bytes in memory)
 uint32 n, n * 30 bytes                  40-byte struct in memory
 256 bytes                               fixed: 32 pairs of uint32
 grid_x * grid_z * uint32                one word per grid cell
 tile_count * 24 bytes
-tile_count * uint32
-...                                     further sections, not yet transcribed
+tile_count * uint32                     a TRAK model index per tile
+[0x10000]  uint32 n, n * 20 bytes       section D; pairs with the flagged tiles
+per tile: vertex colours               see below
 uint32 n, n * 48 bytes                  read byte by byte
-uint32 n, uint32, n * 64-byte structs   entries cross-reference earlier sections
-...                                     two sections gated on global feature flags
+uint32 n, uint32, n * 58 bytes          64 bytes in memory; cross-references earlier
+                                        sections, and holds a second STPC offset
+[0x200000] nested group section          innermost items are 12 bytes, or 16 with 0x4000000
+[0x10]     uint32
 uint16                                  final field
 ```
+
+The per-tile vertex colours are the one data-dependent part. A row is one `uint32` per
+vertex of that tile's model, with the vertex count read from the `TRAK` model header at
+`model * 0x80 + 0x6c` — independently confirming both the 128-byte model stride and the
+vertex count's position. The **high byte of the first row gives the number of rows**.
+Tiles listed in section D then carry a second set of rows for that section's own model,
+with the row count carried over from the first set rather than restarted.
+
+### The feature flags are `WFPC`
+
+Four sections are gated on bits of a global the loader reads through
+`PTR_DAT_004a8c3c`. Those bits are exactly the contents of the level's **`WFPC` chunk**,
+a four-byte word previously unexplained. Taking the flags straight from `WFPC` — no
+searching, no per-level fitting — walks all 75 levels exactly:
+
+```
+0x10       always set; gates a trailing uint32
+0x10000    section D, and with it the second set of per-tile vertex colours (13 levels)
+0x200000   the nested group section (55 levels)
+0x4000000  widens that section's innermost record from 12 to 16 bytes
+```
+
+This matters for editing: a tool that rewrites `MAP` has to keep `WFPC` consistent with
+it, or the game will read the chunk at the wrong offsets.
 
 Earlier statistical guesses at this region were wrong. A column-entropy scan and an
 autocorrelation probe both suggested a uniform 180-byte record, which the code shows
 does not exist; the apparent period came from several different sections interleaving.
-Nothing here should be trusted until the parser walks the whole chunk and consumes it
-exactly, the same test that validated `TRAK`.
 
 The header and tile array are confirmed against the code:
 
@@ -95,8 +124,7 @@ per tile (24 bytes):
                              degrees = rotation / 4096 * 360, confirming the 0x1000
                              full turn; anticlockwise about +Y seen from above
   uint32 model_id            index into TRAK
-  uint32 flags               0 or 1
-<UNKNOWN tail>               actor/object instances live here
+  uint32 flags               0 or 1; non-zero tiles pair with section D in order
 ```
 
 Evidence: across 34,796 tiles the rotation field takes only those four values, and
@@ -116,6 +144,54 @@ A riverbank facing inland was what exposed it, after a long detour spent looking
 per-face UV rotation that does not exist.
 
 Confirmed writable — editing tile `y` moves geometry in the running game.
+
+## MAP entity records — object and actor placement
+
+The second section of the tail is the object list: 518 records across the 75 levels,
+90 bytes each in the file, 92 in memory. Sailor Village has 14, the largest level 44,
+and 33 levels have exactly one.
+
+```
++0x00  uint32   grid x
++0x04  uint32
++0x08  uint32   grid z
++0x0c  uint32   always 1 so far
++0x10  uint32   parameter; meaning appears to depend on the object
++0x14  uint32
++0x18  uint32
++0x1c  uint32
++0x20  uint32   flags: rotation in the high nibbles, bit 8 marks the spawn
++0x24  uint32
++0x28  uint32   byte offset into the level's STPC blob, or 0
+... 46 further bytes, mostly constant within a level
+```
+
+Two independent checks pin this down. **All 518 records place `+0x00` inside their own
+level's `grid_x` and `+0x08` inside `grid_z`** — on grids as small as 32x32, with no
+exceptions, so those two fields are grid coordinates. And **exactly one record per level
+has bit 8 of the flags set, in all 75 levels**; that is the record the loader copies into
+a global of its own, which is what a player spawn point looks like.
+
+The rotation sits in the same 12-bit binary angle as the tiles, but objects use a finer
+step: 505 of 518 records are on the 90-degree marks `0x000/0x400/0x800/0xc00`, and the
+remaining 13 sit on `0x200` boundaries, so entities can face 45 degrees where tiles
+cannot.
+
+### These records are not named
+
+`+0x28` is relocated by the loader against a base pointer, which is what first suggested
+a name string. It is not one. The base is `level+0x1c`, and the `STPC` loader
+(`FUN_00421f40`) allocates its chunk, reads it whole, and stores it at exactly that
+field — so **the offset points into the `STPC` blob**. Every one of the 518 offsets lands
+inside its level's `STPC`, never past the end.
+
+But the offset does not vary per object the way a name would: 58 of 75 levels give every
+record the same value, and the rest use two, usually `0` (which the loader treats as
+null) and one real offset. So it is a shared per-level reference, not a per-object label.
+
+This also settles what `STPC` is. It is not scripts. It is a relocatable data blob that
+the loader reads in one `fread` and then walks with internal fixup tables, which the
+`MAP` entities point into — model or behaviour data, referenced rather than described.
 
 ## TRAK — terrain mesh library
 

@@ -11,7 +11,9 @@ Working:
 
 - WAD container parse/write, byte-exact round-trip on all 79 WADs
 - `LGHT` fully decoded
-- `MAP` tile array decoded (the rest of the chunk is opaque)
+- `MAP` fully walked — every section consumed exactly on all 75 parseable levels
+- `MAP` entity records: grid position, rotation, and the player spawn
+- `WFPC` explained: it is the per-level flag word gating four optional `MAP` sections
 - `TRAK` meshes decoded — vertices, normals, triangles, face normals, bounding boxes
 - `TEXT` decoded — texture pages and the atlas table
 - Which texture each triangle uses, validated on all 75 parseable levels
@@ -23,8 +25,9 @@ Working:
 
 Blocked or untouched:
 
-- The `MAP` tail, which holds actor/object instances — needed for placing objects
-- `STPC`, the largest chunk; contents genuinely unknown (see wad-format.md)
+- What the `MAP` entity records' remaining fields mean — which object each one is
+- `STPC`: known to be a relocatable blob the `MAP` entities point into by byte offset,
+  and known not to be scripts, but its internal layout is undecoded
 - `t0i0m006` and `t0l1m002` use a `TRAK` variant we reject
 - The 44-byte `TRAK` records: layout known, meaning not. Not needed for rendering
 
@@ -63,7 +66,8 @@ croc2/          format library
   level.py      MAP placements + TRAK meshes -> world mesh, textured OBJ export
   png.py        stdlib-only PNG writer for texture pages
   paths.py      where the game data lives
-tools/          roundtrip, survey, render_level, render3d, mod_menu, wadinfo
+tools/          roundtrip, survey, render_level, render3d, mod_menu, wadinfo,
+                mapwalk (walks MAP section by section, checks it consumes exactly)
 game/pristine/  verified untouched disc copy
 game/cd/        what the game reads
 game/backup/    original save file
