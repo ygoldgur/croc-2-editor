@@ -1,0 +1,20 @@
+# Game data. Never commit: Croc 2 is copyright Argonaut Software / Fox Interactive.
+# Bring your own copy of the disc; see README.md for the layout expected here.
+game/
+
+# Reference repositories, cloned separately and each with its own history.
+refs/
+
+# Renders, OBJ exports and texture dumps. All reproducible from tools/, and all
+# derived from the game's own art, so they stay out of the repo for both reasons.
+shots/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# macOS
+.DS_Store
