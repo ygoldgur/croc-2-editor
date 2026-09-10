@@ -14,14 +14,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import importlib.util  # noqa: E402
-
 from croc2 import Wad  # noqa: E402
+from croc2.chunks.map_ import ZONE_SIZE, flags_from_wfpc, walk_sections  # noqa: E402
+from croc2.chunks.trak import HEADER_BASE, HEADER_SIZE  # noqa: E402
 from croc2.paths import PRISTINE_WADS  # noqa: E402
-
-_spec = importlib.util.spec_from_file_location("mapwalk", Path(__file__).parent / "mapwalk.py")
-mapwalk = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(mapwalk)
 
 # (memory offset, file offset, width). The loader reads these in file order.
 LAYOUT = [
@@ -50,12 +46,15 @@ def read_level(path: Path):
     wad = Wad.read(path)
     if not wad.is_level or path.stem in SKIP:
         return None
-    counts = mapwalk.vertex_counts_for(wad)
-    combo = mapwalk.flags_from_wfpc(wad)
+    trak = wad.get("TRAK").payload
+    counts = [struct.unpack_from("<H", trak, HEADER_BASE + i * HEADER_SIZE + 0x6C)[0]
+              for i in range(struct.unpack_from("<I", trak, 0)[0])]
+    wfpc = struct.unpack("<I", wad.get("WFPC").payload)[0]
     data = wad.get("MAP").payload
-    out = mapwalk.walk(data, counts, *combo)
-    at = out["entities_at"]
-    recs = [data[at + i * 90: at + (i + 1) * 90] for i in range(out["n_entities"])]
+    out = walk_sections(data, counts, *flags_from_wfpc(wfpc))
+    at = out["zones_at"]
+    recs = [data[at + i * ZONE_SIZE: at + (i + 1) * ZONE_SIZE]
+            for i in range(out["n_zones"])]
     return path.stem, out["grid_x"], out["grid_z"], recs
 
 

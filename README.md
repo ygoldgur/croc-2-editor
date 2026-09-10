@@ -3,8 +3,16 @@
 Reverse engineering the level format of Croc 2 (PC, Argonaut Software, 2000), working
 towards a Blender add-on for editing and authoring levels.
 
-Terrain currently decodes and renders end to end — tile placement, mesh library,
-textures and UVs — verified by rendering levels and comparing them against the game.
+Terrain decodes and renders end to end — tile placement, mesh library, textures and UVs
+— verified by rendering levels and comparing them against the game. The `MAP` chunk is
+fully walked, its environment zones (fog, camera, music, reverb) are confirmed by
+editing them and launching the game, and both `MAP` and `STPC` now parse to their last
+byte on every level that parses at all.
+
+Objects have positions: 3,205 actor placements game-wide, each with a rotation and a
+pointer to the actor definition it runs. Drawing them is the current frontier — an
+instance points into its actor's behaviour data rather than at a mesh, so which model
+an object uses is still unread.
 
 - [docs/README.md](docs/README.md) — project state, layout and usage
 - [docs/wad-format.md](docs/wad-format.md) — the format itself, field by field
@@ -33,6 +41,7 @@ Nothing outside the Python standard library is needed to read or write WADs.
 python3 tools/roundtrip.py              # byte-exact round-trip over every WAD
 python3 tools/survey.py                 # validate the decoders across all levels
 python3 tools/render3d.py t1l1m001 --target 10.4 1.0 -8.5 --pitch 22 --dist 6
+python3 tools/render_level.py t1l1m001 --mode actors   # where the objects stand
 ```
 
 `roundtrip.py` and `survey.py` are the regression tests; run both after touching a

@@ -5,6 +5,7 @@ Modes: `height` colours triangles by elevation, `texture` tints each face with t
 average colour of its texture, and `textured` samples the real texture pages.
 """
 import argparse
+import math
 import sys
 from pathlib import Path
 
@@ -188,6 +189,50 @@ def render_zones(level: Level, out_path: Path) -> int:
     return len(level.map.zones)
 
 
+def render_actors(level: Level, out_path: Path) -> tuple[int, int]:
+    """The textured map with MAP's actor instances drawn on top, named.
+
+    This is the check on the instance record: if the position fields are read right
+    the markers sit on the terrain, near landmarks that suit their names. If they are
+    wrong they scatter, or pile up off the map.
+    """
+    positions, _ = level.world_faces()
+    pts = np.asarray(positions)
+    lo, hi = pts.min(axis=0), pts.max(axis=0)
+    scale = RESOLUTION / max(hi[0] - lo[0], hi[2] - lo[2])
+
+    img, _ = _textured_image(level, pts, lo, scale)
+    fig, ax = plt.subplots(figsize=(14, 14), dpi=110)
+    ax.imshow(np.clip(img / 255.0, 0, 1))
+
+    inside = 0
+    for inst in level.map.instances:
+        wx, wy, wz = inst.position
+        if lo[0] <= wx <= hi[0] and lo[2] <= wz <= hi[2]:
+            inside += 1
+        sx, sz = (wx - lo[0]) * scale, (wz - lo[2]) * scale
+        # A short stalk towards the facing direction, so a wrong yaw shows up too.
+        yaw = math.radians(inst.degrees[1])
+        ax.plot([sx, sx + math.sin(yaw) * 22], [sz, sz + math.cos(yaw) * 22],
+                color="black", linewidth=1.4, zorder=3)
+        ax.plot([sx], [sz], marker="o", markersize=7, color="magenta",
+                markeredgecolor="black", zorder=4)
+        ax.annotate(f"{inst.index} {level.actor_name(inst)}", (sx, sz),
+                    textcoords="offset points", xytext=(8, -8), color="white",
+                    fontsize=7, zorder=5,
+                    bbox=dict(boxstyle="round,pad=0.15", fc="black", alpha=0.6))
+
+    total = len(level.map.instances)
+    actors = len(level.stpc.actors) if level.stpc else 0
+    ax.set_title(f"{level.name} - {total} actor instances, {actors} actor definitions; "
+                 f"{inside} inside the terrain bounds")
+    ax.set_axis_off()
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+    return total, inside
+
+
 def _textured_image(level: Level, pts, lo, scale):
     """Rasterise the level top-down and hand back the raw image."""
     _, faces = level.world_faces()
@@ -220,7 +265,8 @@ def _textured_image(level: Level, pts, lo, scale):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("levels", nargs="+", help="level stem, e.g. t1l1m001")
-    ap.add_argument("--mode", choices=("height", "texture", "textured", "zones"),
+    ap.add_argument("--mode",
+                    choices=("height", "texture", "textured", "zones", "actors"),
                     default="textured", help="how to colour the map")
     args = ap.parse_args()
     OUT.mkdir(exist_ok=True)
@@ -238,6 +284,9 @@ def main() -> int:
         if args.mode == "zones":
             n = render_zones(level, png)
             print(f"  drew {n} zone records over the map")
+        elif args.mode == "actors":
+            total, inside = render_actors(level, png)
+            print(f"  drew {total} actor instances, {inside} inside the terrain bounds")
         elif args.mode == "textured":
             drawn, untextured = render_textured(level, png)
             print(f"  rasterised {drawn} faces, {untextured} carry no texture")

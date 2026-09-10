@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Survey LGHT, MAP and TRAK across every level: check decoders are complete."""
+"""Survey LGHT, MAP, TRAK and STPC across every level: check decoders are complete."""
+import struct
 import sys
 from collections import Counter
 from pathlib import Path
@@ -7,7 +8,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from croc2 import Wad  # noqa: E402
 from croc2.chunks import LightChunk, MapChunk, TextChunk, TrakChunk, TrakParseError  # noqa: E402
+from croc2.chunks.stpc import GROUPS_FLAG, StpcChunk, StpcParseError  # noqa: E402
 from croc2.paths import PRISTINE_WADS as WADS  # noqa: E402
+
+
+def terrain_footprint(tiles) -> tuple[float, float, float, float]:
+    """The x/z rectangle the tiles cover. Tiles are 1.0 across, centred on .5s."""
+    xs = [t.x for t in tiles]
+    zs = [t.z for t in tiles]
+    return min(xs) - 0.5, max(xs) + 0.5, min(zs) - 0.5, max(zs) + 0.5
 
 
 def main() -> int:
@@ -21,6 +30,8 @@ def main() -> int:
     trak_skipped = 0
     tex_span = []  # highest texture id used, as a fraction of the table size
     faces = Counter()
+    stpc_exact = stpc_failed = 0
+    actors = instances = on_terrain = resolved = 0
 
     for p in sorted(WADS.glob("*.wad")):
         wad = Wad.read(p)
@@ -74,6 +85,37 @@ def main() -> int:
                 bad.append(f"{p.name}: model {m.index} faces cover {covered} "
                            f"of {len(m.triangles)} triangles")
 
+        # STPC must consume exactly, the same bar MAP and TRAK clear.
+        wfpc = struct.unpack("<I", wad.get("WFPC").payload)[0]
+        try:
+            stpc = StpcChunk.parse(wad.get("STPC").payload, bool(wfpc & GROUPS_FLAG))
+        except (StpcParseError, struct.error) as exc:
+            stpc_failed += 1
+            bad.append(f"{p.name}: STPC {exc}")
+            continue
+        if stpc.left:
+            stpc_failed += 1
+            bad.append(f"{p.name}: STPC leaves {stpc.left:+,} bytes")
+            continue
+        stpc_exact += 1
+        actors += len(stpc.actors)
+
+        # Actor instances: each must point inside an actor record, and stand on the
+        # terrain. Anything that does not is a reading error, bar the odd camera.
+        placed = MapChunk.parse(mc.payload, [len(mm.vertices) for mm in trak.models],
+                                wfpc)
+        x0, x1, z0, z1 = terrain_footprint(placed.tiles)
+        for inst in placed.instances:
+            instances += 1
+            if stpc.actor_at(inst.actor_offset) is not None:
+                resolved += 1
+            else:
+                bad.append(f"{p.name}: instance {inst.index} offset "
+                           f"{inst.actor_offset} hits no actor")
+            wx, _, wz = inst.position
+            if x0 <= wx <= x1 and z0 <= wz <= z1:
+                on_terrain += 1
+
     print(f"levels surveyed: {n}")
     print(f"TRAK skipped:    {trak_skipped} (known demo/attract variants)")
     if tex_span:
@@ -83,6 +125,11 @@ def main() -> int:
     if nf:
         print(f"render faces:    {nf} total, {100 * faces['quad'] / nf:.1f}% quads, "
               f"{faces['untextured']} with no texture")
+    print(f"STPC:            {stpc_exact} consumed exactly, {stpc_failed} failed; "
+          f"{actors} actor definitions")
+    if instances:
+        print(f"actor instances: {instances} placed, {resolved} resolve to an actor, "
+              f"{100 * on_terrain / instances:.0f}% stand on the terrain")
     print(f"light types:     {dict(light_types)}")
     print(f"LGHT leftover:   {dict(lght_trailing)}")
     print(f"tile rotations:  {{{', '.join(f'0x{k:X}: {v}' for k, v in sorted(rotations.items()))}}}")

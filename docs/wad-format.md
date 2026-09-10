@@ -9,6 +9,14 @@ Prior art this builds on: [hdc0/Croc-2-mods](https://github.com/hdc0/Croc-2-mods
 (PS1 equivalents). `TRAK` and `MAP` are documented as "unknown purpose" in those
 sources; the layouts below are new work.
 
+The PS1 repo turned out to be worth more than a texture reference. Its `DPSX` section
+is `STPC`'s counterpart and runs in the same order — models, animation, optional extra
+models behind the same flag bit, then a file of actors — and its Croc 2 level file
+holds the same actor instance record this chunk keeps in `MAP`. Two of the sections
+below were read by taking its layout and testing it against the PC data, which is
+faster than either decompiling or guessing. Where the two disagree the PC loader wins,
+since it is the code that actually reads these bytes.
+
 ## Container
 
 ```
@@ -70,7 +78,8 @@ smaller than the in-memory struct the loader scatters them into:
 ```
 uint32 n, n * uint32                    small leading array; 20 in Sailor Village
 uint32 n, n * 90 bytes                  environment zones - see below (92 in memory)
-uint32 n, n * 30 bytes                  40-byte struct in memory
+uint32 n, n * 30 bytes                  40-byte struct in memory; actor instances
+                                        index into it
 256 bytes                               fixed: 32 pairs of uint32
 grid_x * grid_z * uint32                one word per grid cell
 tile_count * 24 bytes
@@ -78,8 +87,7 @@ tile_count * uint32                     a TRAK model index per tile
 [0x10000]  uint32 n, n * 20 bytes       section D; pairs with the flagged tiles
 per tile: vertex colours               see below
 uint32 n, n * 48 bytes                  read byte by byte
-uint32 n, uint32, n * 58 bytes          64 bytes in memory; cross-references earlier
-                                        sections, and holds a second STPC offset
+uint32 n, uint32, n * 58 bytes          the actor instances - see below (64 in memory)
 [0x200000] nested group section          innermost items are 12 bytes, or 16 with 0x4000000
 [0x10]     uint32
 uint16                                  final field
@@ -248,21 +256,98 @@ the terrain entirely, clustered at small x with z = 0, which is fine for a defau
 but should have been a warning against reading them as positions. A "one per level,
 stashed in a global" signature says a record is *distinguished*, not what it means.
 
-### These records are not named
+### +0x28 points at an STPC model
 
-`+0x28` is relocated by the loader against a base pointer, which is what first suggested
-a name string. It is not one. The base is `level+0x1c`, and the `STPC` loader
-(`FUN_00421f40`) allocates its chunk, reads it whole, and stores it at exactly that
-field — so **the offset points into the `STPC` blob**. Every one of the 518 offsets lands
-inside its level's `STPC`, never past the end.
+`+0x28` is relocated by the loader against a base pointer, which first suggested a name
+string. It is not one. The base is `level+0x1c`, and the `STPC` loader (`FUN_00421f40`)
+allocates its chunk, reads it whole, and stores it at exactly that field — so **the
+offset is a byte offset into the `STPC` blob**.
 
-But the offset does not vary per object the way a name would: 58 of 75 levels give every
-record the same value, and the rest use two, usually `0` (which the loader treats as
-null) and one real offset. So it is a shared per-level reference, not a per-object label.
+More precisely, it points at a *model*. Walking `STPC`'s model section gives the offset
+of every model header, and **all 165 non-null zone offsets land exactly on one of those
+boundaries, with none in between**. Since the two numbers come from different chunks
+decoded by different routes, that is also the best evidence the `STPC` model walk is
+right — the model section has no exact-consumption proof of its own yet.
 
-This also settles what `STPC` is. It is not scripts. It is a relocatable data blob that
-the loader reads in one `fread` and then walks with internal fixup tables, which the
-`MAP` entities point into — model or behaviour data, referenced rather than described.
+The offset does not vary per record the way a label would: 58 of 75 levels give every
+zone the same value, and the rest use two, usually `0` (which the loader treats as null)
+and one real offset. So it is a shared per-level model reference.
+
+What a fog-and-camera zone wants with a mesh is not yet known.
+
+## MAP actor instances — where the objects stand
+
+This is what places objects in the world: 3,205 records across the 75 parseable levels,
+36 in Sailor Village, 58 bytes each in the file and 64 in memory. The loader reads them
+into the array at `level+0x2a0`, one field at a time, so every width below is the code's
+and not a guess.
+
+They were passed over for a long time because the search was aimed at `STPC`, where the
+object *names* live. The placements were never there. They are the section this walk had
+already been counting and skipping as opaque bytes.
+
+```
++0x00  uint16   rotation x   \
++0x04  uint16   rotation y    | 12-bit binary angle, as the tiles use
++0x08  uint16   rotation z   /
++0x0c  uint32   world x      \
++0x10  uint32   world y       | 4.12 fixed point, z negated
++0x14  uint32   world z      /
++0x18  uint32   byte offset into the STPC blob, landing inside an actor record
++0x1c  uint32
++0x20  uint32   index into MAP's small leading array, or -1
++0x24  uint32
++0x28  uint32
++0x2c  uint32
++0x30  uint32
++0x34  uint32   index into the 40-byte section above, or -1
++0x38  uint32   overwritten from +0x34 in a second pass over the array
++0x3c  uint32
+```
+
+Two fields identify themselves by being relocated as the loader reads them, which is the
+same tell that cracked the zone records. `+0x18` is added to `level+0x1c`, the base of
+the `STPC` blob. `+0x34` is turned into `section_c + n * 0x28` and bounds-checked against
+that section's count, with a `"Erruuughh"` bailout if it overruns — so the 40-byte
+records after the zones are per-instance data.
+
+Unlike tiles, actors are not confined to quarter turns: the rotation fields use the whole
+0..0x1000 range. In Sailor Village only the middle one varies, which is what a
+ground-standing actor with a yaw and no pitch or roll looks like.
+
+### Evidence
+
+Rendering them is what settled it. `render_level.py --mode actors` draws each instance
+over the textured map, labelled with the name of the actor it points at, and the result
+is not a scatter of markers — it reads like a level:
+
+- All three `Bubbles` instances stand in the water, and nowhere else.
+- `WalkingCroc` is on the starting beach beside the boat.
+- The two `Gobbo Says` markers sit on the two circular pads at the south end.
+- The only two markers off the terrain are `CameraPC` and one unnamed actor.
+
+Three counts back it up, and the third is the one that carries weight:
+
+- **97% of all 3,205 instances stand inside their own level's terrain footprint.**
+- Every instance resolves to an actor record. On its own this proves little — the actors
+  file is one large contiguous span, so a wrong field would often land in it too.
+- **Every instance's `+0x18` is word-aligned within its actor, and 84% point at bytes
+  beginning `b0 00 00 00 d4 00 00 00`**, with 81 distinct signatures over 3,205 records.
+  Alignment holding 3,205 times out of 3,205, and one signature covering most of them,
+  is not something an unrelated `uint32` produces.
+
+The PS1 build stores this same record — 0x40 bytes with the actor offset at `+0x18` — in
+its level file, which is where the reading came from before any of the above was checked.
+
+### Croc's spawn point, probably
+
+`WalkingCroc` is instance 0 in Sailor Village and lands where the level starts. That is
+the best candidate yet for the player spawn, which an earlier round looked for in the
+zone records and did not find.
+
+It is **not** confirmed, and the way to confirm it is the cheap one that caught the last
+wrong answer here: move that instance and launch the game. Until someone does that, this
+is a plausible claim of exactly the kind this project has been burned by before.
 
 ## TRAK — terrain mesh library
 
@@ -399,12 +484,13 @@ rectangle whose corners the face's corners map onto.
 46,524 entries; `0xFF` marks a face with no texture (7,191 of them game-wide). The
 fourth byte is `0xFF` throughout.
 
-## STPC — object models, animation, and the object list
+## STPC — object models, animation, and the actors
 
 The largest chunk, 0.5 to 2.7 MB per level. It is not read field by field. The loader
 (`FUN_00421f40`) allocates the whole chunk, reads it in one `fread`, and then walks it
 patching internal pointers, so every apparent "allocation" is a bump of a cursor through
-the blob itself. `tools/stpcwalk.py` replays that cursor arithmetic.
+the blob itself. `croc2/chunks/stpc.py` replays that cursor arithmetic, and
+**consumes all 75 parseable levels exactly**, the same bar `MAP` and `TRAK` clear.
 
 ```
 uint32 n_models
@@ -412,7 +498,8 @@ n_models * { 0x88-byte header, then that model's arrays }
 uint32 n_animations
 n_animations * { 0x20-byte header, then that record's arrays }
 [0x100] uint32 n_groups, then batched model groups
-<object list>                     names and per-object data; not decoded
+uint32 n_actors
+n_actors * { uint32 size_in_words, then that many words }
 ```
 
 Headers and their arrays alternate, one model at a time, because the loader calls its
@@ -444,15 +531,32 @@ So the object meshes are in the same format as the terrain meshes, and the exist
 `FUN_00424ef0` walks the second section: 0x20-byte headers with nested per-item arrays
 ending in 64-byte blocks, which is the shape of animation data.
 
-### The object list
+### The actors file
 
-The walk above stops short of the end of the chunk — by 12-19% on levels where the
-`0x100` flag is clear, and only 1-6% where it is set. The remainder is a section the
-loader does not relocate unless that flag is on. Nothing follows it, so skipping it
-costs the loader no alignment.
+`FUN_00421f40` returns after the third section, leaving 12-19% of the chunk unread on
+levels where the `0x100` flag is clear and 1-6% where it is set. That is not a section
+the loader skips by accident: nothing in it needs relocating, because `MAP`'s actor
+instances point into it by absolute offset instead.
 
-That remainder holds **the object and actor list**, as plain nul-terminated names padded
-with `0xcd` (MSVC's uninitialised-memory fill). Sailor Village's:
+The layout is the PS1 build's, which documents this as its actors file:
+
+```
+uint32 n_actors
+per actor: uint32 size_in_words, then size_in_words * 4 bytes of payload
+```
+
+Reading it that way **consumes `STPC` exactly on all 75 parseable levels**, which is the
+proof; before this the chunk had no exact-consumption test of its own and rested on the
+zone offsets landing on model boundaries. 949 actor definitions game-wide, 17 in Sailor
+Village, from 24 bytes to 52 KB each. The largest is shared across levels and is almost
+certainly Croc himself.
+
+The payload is behaviour data and is **not** decoded — the PS1 documentation calls it
+Argonaut Strategy Language, and the offsets `MAP` instances point at look like entry
+points into it. Names appear inside it as plain nul-terminated strings padded with `0xcd`
+(MSVC's uninitialised-memory fill), at no fixed offset, so `Actor.names` still finds them
+by scanning. What changed is that a name is now scoped to one actor record rather than to
+the whole chunk, which is what lets an instance be labelled. Sailor Village's:
 
 ```
 WalkingCroc      CameraPC              Gobbo King 1        trampoline
@@ -468,13 +572,15 @@ flag 6`, `Topdialog off`, `GGWaitForCroc`, `bonusroomwarp`, `level flag 2 was se
 `lll open` / `lll not open`. That settles the long-open question of whether level logic
 is data or hard-coded: named, per-level, and shipped in the WAD.
 
-The binary layout of these records is **not** decoded. Names sit at irregular intervals
-inside variable-size blocks, so `tools/stpcwalk.py --names` extracts them by scanning,
-not by parsing. Positions, types and links are still unknown.
-
 The old guess that this chunk was "probably scripts" was half right in a way that would
-have been misleading: the bulk of it is models and animation, and the logic is a list of
-named objects in the tail, not bytecode.
+have been misleading: the bulk of it is models and animation, and the logic is a file of
+named actors in the tail, not a single instruction stream. Whether the actor payloads are
+themselves bytecode is now the open question, and the PS1 documentation's "Argonaut
+Strategy Language" says they are.
+
+The chunk is fully consumed and each actor's extent is known, but what is *inside* an
+actor is not. That is where object types, links and behaviour live, and it is the last
+large unknown in the level format.
 
 ## Level addressing
 

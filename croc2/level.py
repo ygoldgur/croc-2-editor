@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import math
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 
 from .chunks import LightChunk, MapChunk, TextChunk, TrakChunk
+from .chunks.stpc import GROUPS_FLAG, Actor, StpcChunk, StpcParseError
 from .png import write_png
 from .wad import Wad
 
@@ -19,19 +21,47 @@ class Level:
     trak: TrakChunk
     lights: LightChunk
     text: TextChunk
+    stpc: StpcChunk | None = None
 
     @classmethod
     def load(cls, path) -> "Level":
         wad = Wad.read(path)
         if not wad.is_level:
             raise ValueError(f"{path} is not a level wad")
+        trak = TrakChunk.parse(wad.get("TRAK").payload)
+        wfpc_chunk = wad.get("WFPC")
+        wfpc = struct.unpack("<I", wfpc_chunk.payload)[0] if wfpc_chunk else 0
         return cls(
             name=wad.path.stem if wad.path else "level",
-            map=MapChunk.parse(wad.get("MAP").payload),
-            trak=TrakChunk.parse(wad.get("TRAK").payload),
+            # The actor instances sit deep in the MAP tail, past a section sized by
+            # the TRAK vertex counts and behind WFPC's section gates.
+            map=MapChunk.parse(wad.get("MAP").payload,
+                               [len(m.vertices) for m in trak.models], wfpc),
+            trak=trak,
             lights=LightChunk.parse(wad.get("LGHT").payload),
             text=TextChunk.parse(wad.get("TEXT").payload),
+            stpc=cls._stpc(wad, wfpc),
         )
+
+    @staticmethod
+    def _stpc(wad: Wad, wfpc: int) -> StpcChunk | None:
+        chunk = wad.get("STPC")
+        if chunk is None:
+            return None
+        try:
+            return StpcChunk.parse(chunk.payload, bool(wfpc & GROUPS_FLAG))
+        except (StpcParseError, struct.error):
+            return None  # the two demo maps, which fail every chunk walk
+
+    def actor_for(self, instance) -> Actor | None:
+        """The actor definition an instance points at, if STPC could be walked."""
+        if self.stpc is None:
+            return None
+        return self.stpc.actor_at(instance.actor_offset)
+
+    def actor_name(self, instance) -> str:
+        actor = self.actor_for(instance)
+        return actor.name if actor else f"@{instance.actor_offset}"
 
     def place(self, tile):
         """The tile's model vertices, rotated about Y and moved into world space.
