@@ -17,7 +17,7 @@ import numpy as np  # noqa: E402
 from matplotlib.collections import PolyCollection  # noqa: E402
 
 from croc2.level import Level  # noqa: E402
-from croc2.paths import PRISTINE_WADS  # noqa: E402
+from croc2.paths import GAME_WADS, PRISTINE_WADS  # noqa: E402
 
 OUT = Path(__file__).resolve().parent.parent / "shots"
 RESOLUTION = 1400
@@ -268,11 +268,15 @@ def main() -> int:
     ap.add_argument("--mode",
                     choices=("height", "texture", "textured", "zones", "actors"),
                     default="textured", help="how to colour the map")
+    ap.add_argument("--from-game", action="store_true",
+                    help="read the writable copy the game loads, not the pristine one, "
+                         "to see what an edit actually did")
     args = ap.parse_args()
     OUT.mkdir(exist_ok=True)
+    wads = GAME_WADS if args.from_game else PRISTINE_WADS
 
     for stem in args.levels:
-        level = Level.load(PRISTINE_WADS / f"{stem}.wad")
+        level = Level.load(wads / f"{stem}.wad")
         obj = OUT / f"{stem}.obj"
         nv, nf = level.write_obj(obj)
         lo, hi = level.bounds()

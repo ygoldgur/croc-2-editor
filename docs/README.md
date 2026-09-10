@@ -226,7 +226,14 @@ python3 tools/mod_menu.py               # red lights + lifted tiles in the main 
 python3 tools/mod_zone.py t1l1m001      # white close fog; proves the zone fields
 python3 tools/mod_zone.py t1l1m001 --music 36    # swap a level's music track
 python3 tools/mod_zone.py t1l1m001 --restore
+python3 tools/mod_actor.py t1l1m001 --list       # the level's actor instances
+python3 tools/mod_actor.py t1l1m001              # move Croc and a Gobbo; needs a human
+python3 tools/mod_actor.py t1l1m001 --move 2 12 1.5 -7.5    # one instance, by hand
+python3 tools/mod_actor.py t1l1m001 --restore
 ```
+
+After writing an edit, `render_level.py --from-game` reads the copy the game loads
+rather than the pristine one, which shows what the edit did before launching anything.
 
 `tools/survey.py` and `roundtrip.py` are the regression tests — run them after any
 change to the decoders.

@@ -104,6 +104,9 @@ def main() -> int:
         # terrain. Anything that does not is a reading error, bar the odd camera.
         placed = MapChunk.parse(mc.payload, [len(mm.vertices) for mm in trak.models],
                                 wfpc)
+        # Splicing instances back is a write path now, so it has to be lossless.
+        if placed.to_bytes() != mc.payload:
+            bad.append(f"{p.name}: MAP round-trip with instances parsed")
         x0, x1, z0, z1 = terrain_footprint(placed.tiles)
         for inst in placed.instances:
             instances += 1

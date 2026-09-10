@@ -195,7 +195,7 @@ class ActorInstance:
     """
 
     index: int
-    raw: bytes
+    raw: bytearray
 
     # Memory offset -> (file offset, width). The three leading uint16s are widened to
     # uint32 in memory, so the two stop agreeing immediately; fields are addressed by
@@ -210,6 +210,11 @@ class ActorInstance:
     def word(self, mem_off: int) -> int:
         off, width = self.FIELDS[mem_off]
         return struct.unpack_from("<H" if width == 2 else "<I", self.raw, off)[0]
+
+    def set_word(self, mem_off: int, value: int) -> None:
+        off, width = self.FIELDS[mem_off]
+        struct.pack_into("<H" if width == 2 else "<I", self.raw, off,
+                         value & (0xFFFF if width == 2 else 0xFFFFFFFF))
 
     @property
     def rotation(self) -> tuple[int, int, int]:
@@ -233,6 +238,12 @@ class ActorInstance:
         """
         return (self.word(0x0C) / 4096.0, self.word(0x10) / 4096.0,
                 -self.word(0x14) / 4096.0)
+
+    @position.setter
+    def position(self, xyz: tuple[float, float, float]) -> None:
+        x, y, z = xyz
+        for mem_off, value in ((0x0C, x), (0x10, y), (0x14, -z)):
+            self.set_word(mem_off, int(round(value * 4096)))
 
     @property
     def actor_offset(self) -> int:
@@ -436,7 +447,8 @@ class MapChunk:
         at = out["instances_at"]
         self.instances_at = at - rest_at
         self.instances = [
-            ActorInstance(i, data[at + i * INSTANCE_SIZE:at + (i + 1) * INSTANCE_SIZE])
+            ActorInstance(i, bytearray(
+                data[at + i * INSTANCE_SIZE:at + (i + 1) * INSTANCE_SIZE]))
             for i in range(out["n_instances"])
         ]
 
@@ -462,11 +474,14 @@ class MapChunk:
         return out + self._rest_bytes()
 
     def _rest_bytes(self) -> bytes:
-        """rest, with any zone edits spliced back in."""
-        if self.zones_at < 0 or not self.zones:
-            return self.rest
+        """rest, with any zone and actor instance edits spliced back in."""
         rest = bytearray(self.rest)
-        for i, zone in enumerate(self.zones):
-            at = self.zones_at + i * ZONE_SIZE
-            rest[at:at + ZONE_SIZE] = zone.raw
+        if self.zones_at >= 0:
+            for i, zone in enumerate(self.zones):
+                at = self.zones_at + i * ZONE_SIZE
+                rest[at:at + ZONE_SIZE] = zone.raw
+        if self.instances_at >= 0:
+            for i, inst in enumerate(self.instances):
+                at = self.instances_at + i * INSTANCE_SIZE
+                rest[at:at + INSTANCE_SIZE] = inst.raw
         return bytes(rest)
