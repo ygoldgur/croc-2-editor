@@ -12,8 +12,12 @@ byte on every level that parses at all.
 Objects have positions: 3,205 actor placements game-wide, each with a rotation and a
 pointer to the actor definition it runs. Moving two of them and launching the game puts
 Croc and a Gobbo King exactly where the edit says, which also identifies the player
-spawn. Drawing objects is the current frontier — an instance points into its actor's
-behaviour data rather than at a mesh, so which model an object uses is still unread.
+spawn. The object meshes decode and render too — textured, from the same atlas the
+terrain uses.
+
+What is missing is the link between the two: an instance points into its actor's
+behaviour data rather than at a mesh, so we know where every object stands and what
+every model looks like without yet knowing which is which.
 
 - [docs/README.md](docs/README.md) — project state, layout and usage
 - [docs/wad-format.md](docs/wad-format.md) — the format itself, field by field

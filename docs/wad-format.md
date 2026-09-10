@@ -529,6 +529,75 @@ exactly the offsets, of the terrain meshes in `TRAK`:
 +0x82  uint16 count            -> count * 2            an extra array TRAK has no room for
 ```
 
+The arrays follow the header in the order the fixup helper allocates them, and it writes
+a pointer to each one back into the header as it goes, which names them:
+
+```
++0x84   <- the +0x82 array     first
++0x70   <- vertices            then
++0x74   <- triangles           then
++0x7c   <- the 44-byte faces   last
+```
+
+The first 0x80 bytes of the header are `TRAK`'s, so the bounding box at `+0x0C` and the
+counts are read from the same offsets. Two things differ, and only two: the array
+positions, because `STPC` interleaves each model's header with its own data while `TRAK`
+stores all headers first; and the triangle's texture field, which is a `uint16` at `+0x08`
+that the loader overwrites with `DAT_004b5a94 + n * 0x14`.
+
+**That table is `TEXT`'s.** It is filled by a loader that reads a `uint16` and six bytes
+per entry — the same eight bytes as a `TEXT` atlas entry — and scatters them into 20-byte
+structs, and later code indexes it for the page number and the u/v pair exactly as the
+terrain renderer does. So object materials index the same texture table as terrain, and
+objects can be textured with the existing machinery. This settles a worry left open in an
+earlier round, which was that they might not.
+
+### Two kinds of model, and the split is visible before rendering
+
+`croc2/chunks/stpc.py` decodes these into the same mesh type `TRAK` produces. The result
+divides cleanly, on whether the model has the extra `uint16` array:
+
+| | models | face normal matches geometry | header bbox matches vertices |
+|---|---|---|---|
+| no extra array | 1,596 | **100.00%** | **100.00%** |
+| with extra array | 521 | 17.47% | 0.77% |
+
+The first row is the same standard `TRAK`'s meshes meet, and it is what says the layout
+above is right rather than merely plausible. Vertex normals are unit length on 99.88% of
+the first group.
+
+The second row is not a decoding failure so much as an unfinished job. Those models are
+**articulated**: their stored vertices do not fill the bounding box the header declares,
+and normals computed from the raw positions disagree with the stored ones — which is what
+happens when a model's parts each still need a transform applied. Rendered raw, they come
+out as a heap of pieces near the origin. The transforms are presumably what the animation
+section holds, and the extra `uint16` array is presumably the part table, but neither is
+decoded. `tools/render_object.py` leaves them out unless asked.
+
+The extra array and the 44-byte faces are close to mutually exclusive, which is worth
+noting for whoever picks this up: 1,083 models have neither, 513 have only faces, 499 have
+only the extra array, and 22 have both.
+
+### Some object models are invisible
+
+Three of Sailor Village's 28 models have no textured faces at all — every face selects
+the `0xFF` no-page marker. They are collision geometry, which the level's actor names
+corroborate: one of them is `tramp collider`. A renderer that skips untextured faces draws
+nothing for these, so it is worth reporting them rather than showing an empty frame.
+
+### What the props are
+
+The static models come out as recognisable Croc 2 objects, and they match the actor names
+in the same level: the red `?` crate against `Smash Box toolbox`, a purple pot against
+`Hub 1 Heart Pot`, a red heart pickup, two purple trampoline surfaces against
+`trampoline`, a lettered clipboard against `Clipboard Gobbo`, and four wooden doors
+against the level's five `CBKDoorTrigger` instances. Correct UVs on a crate face are hard
+to get by accident.
+
+What is still missing is the link from a placed object to its model. An actor instance
+points into its actor's payload, not at a model index, so we can say where every object
+stands and what every model looks like, without yet knowing which is which.
+
 This also explains something left dangling in the `TRAK` notes: the two `uint32` zeros
 at `+0x70` and `+0x74` in every terrain model header. They are pointer slots, and this
 is the code that fills them. `STPC`'s header is eight bytes longer than `TRAK`'s to fit

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Survey LGHT, MAP, TRAK and STPC across every level: check decoders are complete."""
+import math
 import struct
 import sys
 from collections import Counter
@@ -10,6 +11,40 @@ from croc2 import Wad  # noqa: E402
 from croc2.chunks import LightChunk, MapChunk, TextChunk, TrakChunk, TrakParseError  # noqa: E402
 from croc2.chunks.stpc import GROUPS_FLAG, StpcChunk, StpcParseError  # noqa: E402
 from croc2.paths import PRISTINE_WADS as WADS  # noqa: E402
+
+
+def normal_matches(model) -> tuple[int, int]:
+    """How many stored face normals point the same way as the triangle's own geometry.
+
+    A field can only pass this test if it really is the face normal, which is what
+    pinned the TRAK triangle layout down and now says the same for STPC's models.
+    """
+    ok = total = 0
+    for (a, b, c), fn in zip(model.triangles, model.face_normals):
+        pa, pb, pc = model.vertices[a], model.vertices[b], model.vertices[c]
+        u = [pb[k] - pa[k] for k in range(3)]
+        v = [pc[k] - pa[k] for k in range(3)]
+        g = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2],
+             u[0] * v[1] - u[1] * v[0]]
+        gl = math.sqrt(sum(t * t for t in g))
+        fl = math.sqrt(sum(t * t for t in fn))
+        if gl < 1e-9 or fl < 1e-9:
+            continue
+        total += 1
+        ok += sum(g[k] * fn[k] for k in range(3)) / (gl * fl) > 0.99
+    return ok, total
+
+
+def bbox_matches(model) -> bool:
+    """Whether the vertices fill the bounding box the header declares."""
+    if not model.vertices:
+        return True
+    for k in range(3):
+        values = [p[k] for p in model.vertices]
+        if (abs(min(values) - model.bbox_min[k]) > 1e-3
+                or abs(max(values) - model.bbox_max[k]) > 1e-3):
+            return False
+    return True
 
 
 def terrain_footprint(tiles) -> tuple[float, float, float, float]:
@@ -32,6 +67,9 @@ def main() -> int:
     faces = Counter()
     stpc_exact = stpc_failed = 0
     actors = instances = on_terrain = resolved = 0
+    obj_models = Counter()
+    obj_bbox = Counter()
+    obj_normals = {"static": (0, 0), "articulated": (0, 0)}
 
     for p in sorted(WADS.glob("*.wad")):
         wad = Wad.read(p)
@@ -100,6 +138,27 @@ def main() -> int:
         stpc_exact += 1
         actors += len(stpc.actors)
 
+        # Object models. The static ones - no extra uint16 array - must pass the same
+        # tests TRAK's meshes pass. The articulated ones are expected to fail them,
+        # because their parts still need a transform this decoder does not apply.
+        for i, ref in enumerate(stpc.models):
+            model = stpc.model(wad.get("STPC").payload, i)
+            kind = "articulated" if ref.extra_count else "static"
+            obj_models[kind] += 1
+            ok, total = normal_matches(model)
+            obj_normals[kind] = (obj_normals[kind][0] + ok,
+                                 obj_normals[kind][1] + total)
+            obj_bbox[kind] += bbox_matches(model)
+            if max(model.texture_ids, default=0) >= entries:
+                bad.append(f"{p.name}: STPC model {i} texture id out of range")
+            if kind == "static":
+                if total and ok != total:
+                    bad.append(f"{p.name}: static STPC model {i} has {total - ok} "
+                               f"face normals that disagree with its geometry")
+                if not bbox_matches(model):
+                    bad.append(f"{p.name}: static STPC model {i} does not fill its "
+                               f"declared bounding box")
+
         # Actor instances: each must point inside an actor record, and stand on the
         # terrain. Anything that does not is a reading error, bar the odd camera.
         placed = MapChunk.parse(mc.payload, [len(mm.vertices) for mm in trak.models],
@@ -133,6 +192,14 @@ def main() -> int:
     if instances:
         print(f"actor instances: {instances} placed, {resolved} resolve to an actor, "
               f"{100 * on_terrain / instances:.0f}% stand on the terrain")
+    for kind in ("static", "articulated"):
+        n = obj_models[kind]
+        if not n:
+            continue
+        ok, total = obj_normals[kind]
+        print(f"object models:   {n:>5} {kind:<12} "
+              f"face normals match {100 * ok / max(total, 1):6.2f}%, "
+              f"bbox exact {100 * obj_bbox[kind] / n:6.2f}%")
     print(f"light types:     {dict(light_types)}")
     print(f"LGHT leftover:   {dict(lght_trailing)}")
     print(f"tile rotations:  {{{', '.join(f'0x{k:X}: {v}' for k, v in sorted(rotations.items()))}}}")

@@ -39,6 +39,8 @@ import re
 import struct
 from dataclasses import dataclass, field
 
+from .trak import Model, bbox_from_header, read_model
+
 MODEL_HEADER = 0x88  # vs 0x80 in TRAK: eight more bytes, one more array
 VERTEX_SIZE = 0x18
 TRIANGLE_SIZE = 0x1C
@@ -70,12 +72,21 @@ def _u32(data: bytes, off: int) -> int:
 
 @dataclass
 class ModelRef:
-    """Where one object model sits in the chunk, and how big its arrays are."""
+    """Where one object model sits in the chunk, and how big its arrays are.
+
+    The array order is `FUN_00424db0`'s, which stores a pointer to each one back into
+    the header as it goes: the extra `uint16` array (+0x84), then vertices (+0x70),
+    triangles (+0x74), then the 44-byte faces (+0x7c).
+    """
     offset: int          # byte offset of the 0x88-byte header
     vertex_count: int
     triangle_count: int
     face_count: int      # quad_count + extra_count, the 44-byte records
     extra_count: int     # the uint16 array TRAK has no room for
+    extra_at: int = 0
+    vertices_at: int = 0
+    triangles_at: int = 0
+    faces_at: int = 0
 
 
 @dataclass
@@ -161,6 +172,21 @@ class StpcChunk:
                 return actor
         return None
 
+    def model(self, data: bytes, index: int) -> Model:
+        """Decode one object model into the same mesh type TRAK produces.
+
+        The header's first 0x80 bytes are TRAK's, so the bounding box and the array
+        counts are read from the same offsets; only the array positions and the
+        triangle's texture width differ.
+        """
+        ref = self.models[index]
+        lo, hi = bbox_from_header(data, ref.offset)
+        return read_model(data, index, lo, hi,
+                          ref.vertices_at, ref.vertex_count,
+                          ref.triangles_at, ref.triangle_count,
+                          ref.faces_at, ref.face_count,
+                          texture_width=2)
+
 
 def _walk_models(data: bytes, cursor: int, count: int, into: list[ModelRef]) -> int:
     """FUN_00424db0: headers first, then each model's arrays in header order."""
@@ -172,8 +198,12 @@ def _walk_models(data: bytes, cursor: int, count: int, into: list[ModelRef]) -> 
         verts = _u16(data, rec + 0x6C)
         tris = _u16(data, rec + 0x6E)
         faces = _u16(data, rec + 0x78) + _u16(data, rec + 0x7A)
-        cursor += extra * 2 + verts * VERTEX_SIZE + tris * TRIANGLE_SIZE + faces * FACE_SIZE
-        into.append(ModelRef(rec, verts, tris, faces, extra))
+        ref = ModelRef(rec, verts, tris, faces, extra, extra_at=cursor)
+        ref.vertices_at = ref.extra_at + extra * 2
+        ref.triangles_at = ref.vertices_at + verts * VERTEX_SIZE
+        ref.faces_at = ref.triangles_at + tris * TRIANGLE_SIZE
+        cursor = ref.faces_at + faces * FACE_SIZE
+        into.append(ref)
         if cursor > len(data):
             raise StpcParseError(f"model {i} ran past the end at {cursor}")
     return cursor

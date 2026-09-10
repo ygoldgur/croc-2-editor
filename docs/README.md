@@ -22,6 +22,9 @@ Working:
 - **`STPC` consumed exactly on all 75 parseable levels**, the same bar `MAP` and `TRAK`
   clear: object models (same format as `TRAK`), animation, and a file of 949 actor
   definitions whose extents are now known
+- **Object models decode and render**, textured, from the same `TEXT` table terrain uses.
+  The 1,596 static models pass the `TRAK` tests exactly: every face normal matches its
+  geometry, every declared bounding box matches its vertices
 - Level logic is data, not engine code: per-level named scripts and triggers ship in
   the WAD, which answers the long-open scripting question
 - Zone `+0x28` points at an `STPC` model: all 165 non-null offsets land exactly on a
@@ -42,8 +45,14 @@ Blocked or untouched:
   whose extent we know and whose contents we do not. Object types, links and behaviour
   are in there, and the PS1 documentation calls it Argonaut Strategy Language. This is
   now the last large unknown in the level format
-- Objects are placed but not yet *drawn*: the instance record points at an entry point
-  inside its actor, not at a model index, so which mesh an object uses is still unread
+- **Which model a placed object uses.** Positions are known and meshes are known, but not
+  the link between them: an instance points at an entry point inside its actor's payload,
+  not at a model index. This is the one thing standing between the two and a level that
+  draws its objects
+- The 521 articulated models, whose parts need transforms this decoder does not apply.
+  Their vertices do not fill the header's bounding box and their computed normals disagree
+  with the stored ones. The transforms are presumably in the animation section, and the
+  extra `uint16` array at `+0x82` is presumably the part table
 - `t0i0m006` and `t0l1m002` use a `TRAK` variant we reject, and also fail the `MAP`
   and `STPC` walks
 - The 44-byte `TRAK` records: layout known, meaning not. Not needed for rendering
@@ -90,28 +99,27 @@ Roughly in order of value per effort. Each has a first concrete action and a tes
 would say whether it worked, because the things that went wrong here went wrong by being
 plausible rather than by being untested.
 
-**1. Render an object.** The `STPC` model headers use the same sub-array sizes at the
-same offsets as `TRAK`, so the existing mesh decoder should read them with the header
-size changed from `0x80` to `0x88`. The model boundaries are corroborated twice over now:
-every non-null zone `+0x28` lands on one, and the walk that produces them consumes the
-chunk exactly. First action: run `trak.py`'s parser over the offsets in
-`StpcChunk.models`, and export one to OBJ. It works if the result is a closed, sensibly
-scaled mesh rather than noise. Watch for two differences: the extra `uint16` array at
-`+0x82` that `TRAK` has no room for, and texture indices — the loader rewrites a `uint16`
-in each triangle into a pointer to a 20-byte entry in a table at `DAT_004b5a94`, so
-object materials may not index `TEXT` the way terrain does.
+**1. Find the model an actor uses.** This is the last thing between placed objects and
+drawn ones, now that both ends exist. An instance points at an entry point inside its
+actor's payload, not at a model index, so the link runs through the actor. First action:
+take the `b0 00 00 00 d4 00 00 00` header that 84% of instances point at and find what
+reads it — those two words are constant across most of the game, which makes them a shape
+rather than data. Cross-check against `STPC`'s model count per level: whatever the field
+is, it has to stay inside it. It works when each Sailor Village instance names a model and
+the mesh suits the label — the level has a `?` crate, a heart pot and a trampoline in both
+lists, so the answer is checkable by eye.
 
-**2. Find the model an actor uses.** This is what stands between placed objects and drawn
-objects. An instance points at an entry point inside its actor's payload, not at a model
-index, so the link runs through the actor. First action: take the `b0 00 00 00 d4 00 00 00`
-header that 84% of instances point at and find what reads it — those two words are
-constant across most of the game, which makes them a shape rather than data. Cross-check
-against `STPC`'s model count per level: whatever the field is, it has to stay inside it.
-It works when each Sailor Village instance names a model and the mesh suits the label.
+**2. Transform the articulated models.** 521 of 2,117 models have parts that still need
+placing; they are the characters, so this is what stands between a static diorama and
+something that looks like the game. First action: find what consumes the extra `uint16`
+array at `+0x82`, whose pointer the loader stores at `+0x84`. It works when a Gobbo's
+vertices fill the bounding box its own header declares, which is a test that needs no
+rendering and currently fails on 99% of these.
 
-**3. Blender add-on.** Terrain is fully decoded and objects now have positions, so a
-first pass could show both. Worth starting before the format work is finished, because
-round-tripping a real edit through Blender will expose gaps that reading bytes will not.
+**3. Blender add-on.** Terrain is fully decoded, objects have positions, and static object
+meshes decode, so a first pass could show all three. Worth starting before the format work
+is finished, because round-tripping a real edit through Blender will expose gaps that
+reading bytes will not.
 
 **4. Finish the zone story.** Two loose ends: which zone the game picks as Croc moves,
 and what the 335 point-shaped records mean next to the 183 boxes. First action: find the
@@ -179,9 +187,10 @@ croc2/          format library
   png.py        stdlib-only PNG writer for texture pages
   paths.py      where the game data lives
 tools/          roundtrip, survey, render_level, render3d, mod_menu, wadinfo,
+                render_object (draws the STPC object meshes),
                 mapwalk and stpcwalk (report whether the library's walks consume
                 their chunk exactly), zones (surveys the MAP zone records),
-                mod_zone (fog test)
+                mod_zone (fog test), mod_actor (moves objects, spawn included)
 game/pristine/  verified untouched disc copy
 game/cd/        what the game reads
 game/backup/    original save file
@@ -201,6 +210,16 @@ python3 tools/render_level.py t1l1m001 --mode zones     # zone boxes drawn over 
 python3 tools/render_level.py t1l1m001 --mode actors    # actor instances, named
 python3 tools/render3d.py t1l1m001 --target 10.4 1.0 -8.5 --yaw 180 --pitch 25 --dist 7
 python3 tools/wadinfo.py <file.wad>     # chunk layout of one file
+```
+
+The objects out of `STPC`, textured, from an orbiting camera:
+
+```sh
+python3 tools/render_object.py t1l1m001            # a montage of the static models
+python3 tools/render_object.py t1l1m001 --list     # sizes, and which are articulated
+python3 tools/render_object.py t1l1m001 --model 8 --obj   # one model, large, plus OBJ
+python3 tools/render_object.py t1l1m001 --articulated     # include the ones we cannot
+                                                         # yet place the parts of
 ```
 
 Chunk walkers. Each reports whether it consumed its chunk exactly, which is the test

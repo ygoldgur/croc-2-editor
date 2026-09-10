@@ -129,6 +129,53 @@ def _merge_quads(records, vertex_count):
     return faces
 
 
+def read_model(data: bytes, index: int, bbox_min, bbox_max,
+               vertices_at: int, vertex_count: int,
+               triangles_at: int, triangle_count: int,
+               faces_at: int, face_count: int,
+               texture_width: int = 4) -> Model:
+    """Read one model's arrays from wherever they sit.
+
+    Offsets are passed in rather than assumed contiguous, because STPC interleaves each
+    model's header with its own arrays and puts an extra array in front of the vertices,
+    while TRAK stores all headers first and all data after.
+
+    ``texture_width`` is 4 for TRAK and 2 for STPC: the STPC loader reads a ``uint16``
+    at +0x08 and overwrites the whole dword with a pointer into the texture table. Both
+    index the same TEXT entry table.
+    """
+    m = Model(index, bbox_min, bbox_max)
+    for v in range(vertex_count):
+        px, py, pz, nx, ny, nz = struct.unpack_from("<6f", data,
+                                                    vertices_at + v * VERTEX_SIZE)
+        m.vertices.append((px, py, pz))
+        m.normals.append((nx, ny, nz))
+
+    m.triangles_raw = data[triangles_at:triangles_at + triangle_count * TRIANGLE_SIZE]
+    texture_fmt = "<H" if texture_width == 2 else "<I"
+    records = []
+    for t in range(triangle_count):
+        base = triangles_at + t * TRIANGLE_SIZE
+        flags, = struct.unpack_from("<H", data, base)
+        a, b, c = struct.unpack_from("<3H", data, base + 2)
+        texture, = struct.unpack_from(texture_fmt, data, base + 8)
+        records.append((flags, (a, b, c), texture))
+        if max(a, b, c) < vertex_count:
+            m.triangles.append((a, b, c))
+            m.texture_ids.append(texture)
+            m.face_normals.append(struct.unpack_from("<3f", data, base + 12))
+    m.faces = _merge_quads(records, vertex_count)
+    m.faces_raw = data[faces_at:faces_at + face_count * FACE_SIZE]
+    return m
+
+
+def bbox_from_header(data: bytes, header_at: int):
+    """The eight AABB corners at +0x0C, reduced to a min and a max."""
+    corners = struct.unpack_from("<24f", data, header_at + 0x0C)
+    xs, ys, zs = corners[0::3], corners[1::3], corners[2::3]
+    return (min(xs), min(ys), min(zs)), (max(xs), max(ys), max(zs))
+
+
 @dataclass
 class TrakChunk:
     models: list[Model]
@@ -144,12 +191,10 @@ class TrakChunk:
         total = 0
         for i in range(count):
             o = HEADER_BASE + i * HEADER_SIZE
-            corners = struct.unpack_from("<24f", data, o + 0x0C)
-            xs, ys, zs = corners[0::3], corners[1::3], corners[2::3]
+            lo, hi = bbox_from_header(data, o)
             vc, tc = struct.unpack_from("<2H", data, o + 0x6C)
             qc, ec = struct.unpack_from("<2H", data, o + 0x78)
-            specs.append((i, (min(xs), min(ys), min(zs)), (max(xs), max(ys), max(zs)),
-                          vc, tc, qc + ec))
+            specs.append((i, lo, hi, vc, tc, qc + ec))
             total += VERTEX_SIZE * vc + TRIANGLE_SIZE * tc + FACE_SIZE * (qc + ec)
 
         if total != len(data) - data_start:
@@ -159,29 +204,10 @@ class TrakChunk:
         models = []
         pos = data_start
         for i, lo, hi, vc, tc, fc in specs:
-            m = Model(i, lo, hi)
-            for v in range(vc):
-                px, py, pz, nx, ny, nz = struct.unpack_from("<6f", data, pos + v * VERTEX_SIZE)
-                m.vertices.append((px, py, pz))
-                m.normals.append((nx, ny, nz))
-            pos += vc * VERTEX_SIZE
-
-            m.triangles_raw = data[pos:pos + tc * TRIANGLE_SIZE]
-            records = []
-            for t in range(tc):
-                base = pos + t * TRIANGLE_SIZE
-                flags, = struct.unpack_from("<H", data, base)
-                a, b, c = struct.unpack_from("<3H", data, base + 2)
-                texture, = struct.unpack_from("<I", data, base + 8)
-                records.append((flags, (a, b, c), texture))
-                if max(a, b, c) < vc:
-                    m.triangles.append((a, b, c))
-                    m.texture_ids.append(texture)
-                    m.face_normals.append(struct.unpack_from("<3f", data, base + 12))
-            m.faces = _merge_quads(records, vc)
-            pos += tc * TRIANGLE_SIZE
-
-            m.faces_raw = data[pos:pos + fc * FACE_SIZE]
-            pos += fc * FACE_SIZE
-            models.append(m)
+            vertices_at = pos
+            triangles_at = vertices_at + vc * VERTEX_SIZE
+            faces_at = triangles_at + tc * TRIANGLE_SIZE
+            models.append(read_model(data, i, lo, hi, vertices_at, vc,
+                                     triangles_at, tc, faces_at, fc))
+            pos = faces_at + fc * FACE_SIZE
         return cls(models)

@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 from matplotlib.collections import PolyCollection  # noqa: E402
 
+from croc2.chunks import TextChunk  # noqa: E402
 from croc2.level import Level  # noqa: E402
 from croc2.paths import GAME_WADS, PRISTINE_WADS  # noqa: E402
 
@@ -60,9 +61,10 @@ def render_flat(level: Level, out_path: Path, mode: str) -> None:
     plt.close(fig)
 
 
-def _page_images(level: Level):
+def _page_images(text: TextChunk):
+    """Decode every texture page to an RGB array, or None where one does not decode."""
     pages = []
-    for tex in level.text.textures:
+    for tex in text.textures:
         flat = np.frombuffer(tex.to_rgb(), dtype=np.uint8)
         if flat.size == tex.height * tex.width * 3:
             pages.append(flat.reshape(tex.height, tex.width, 3).astype(np.float32))
@@ -107,7 +109,7 @@ def _raster(img, zbuf, screen, uvs, depths, page):
 
 def render_textured(level: Level, out_path: Path) -> tuple[int, int]:
     positions, faces = level.world_faces()
-    pages = _page_images(level)
+    pages = _page_images(level.text)
     pts = np.asarray(positions)
     lo, hi = pts.min(axis=0), pts.max(axis=0)
     scale = RESOLUTION / max(hi[0] - lo[0], hi[2] - lo[2])
@@ -236,7 +238,7 @@ def render_actors(level: Level, out_path: Path) -> tuple[int, int]:
 def _textured_image(level: Level, pts, lo, scale):
     """Rasterise the level top-down and hand back the raw image."""
     _, faces = level.world_faces()
-    pages = _page_images(level)
+    pages = _page_images(level.text)
     hi = pts.max(axis=0)
     width = int((hi[0] - lo[0]) * scale) + 1
     height = int((hi[2] - lo[2]) * scale) + 1

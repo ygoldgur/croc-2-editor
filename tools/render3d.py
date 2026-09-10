@@ -70,10 +70,13 @@ def raster(img, zbuf, tri, uvs, page, shade, cull=True):
     window[mask] = inv_w[mask]
 
 
-def render(level, out_path, target, yaw, pitch, distance, size, fov, flip_v=True,
-           cull=True):
-    positions, faces = level.world_faces()
-    pages = _page_images(level)
+def rasterise(positions, faces, pages, entries, target, yaw, pitch, distance,
+              size, fov, flip_v=True, cull=True):
+    """Draw a set of textured faces from an orbiting camera; return (image, drawn).
+
+    Split out from `render` so anything with vertices, faces and a texture table can be
+    photographed the same way - a whole level, or one object out of STPC.
+    """
     pts = np.asarray(positions)
 
     ry, rp = math.radians(yaw), math.radians(pitch)
@@ -94,9 +97,9 @@ def render(level, out_path, target, yaw, pitch, distance, size, fov, flip_v=True
 
     drawn = 0
     for indices, texture_id in faces:
-        if texture_id >= len(level.text.entries):
+        if texture_id >= len(entries):
             continue
-        entry = level.text.entries[texture_id]
+        entry = entries[texture_id]
         page = pages[entry.page] if entry.has_texture else None
         if page is None:
             continue
@@ -120,6 +123,14 @@ def render(level, out_path, target, yaw, pitch, distance, size, fov, flip_v=True
                    [uvs[a], uvs[b], uvs[c]], page, shade, cull)
         drawn += 1
 
+    return img, drawn
+
+
+def render(level, out_path, target, yaw, pitch, distance, size, fov, flip_v=True,
+           cull=True):
+    positions, faces = level.world_faces()
+    img, drawn = rasterise(positions, faces, _page_images(level.text), level.text.entries,
+                           target, yaw, pitch, distance, size, fov, flip_v, cull)
     plt.imsave(out_path, np.clip(img / 255.0, 0, 1))
     return drawn
 
