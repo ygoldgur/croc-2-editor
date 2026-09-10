@@ -14,7 +14,11 @@ Working:
 - `MAP` fully walked — every section consumed exactly on all 75 parseable levels
 - `MAP` zone records: fog, camera angle, music and reverb, confirmed in-game
 - **`MAP` actor instances decoded — objects have positions**: 3,205 placements
-  game-wide, with rotation, world position and a pointer into `STPC`'s actors
+  game-wide, with rotation, world position and a pointer into `STPC`'s actors.
+  Confirmed by moving two of them and launching the game
+- **The player spawn is `WalkingCroc`'s instance**, confirmed the same way: move it and
+  Croc arrives somewhere else. This is the question an earlier round looked for in the
+  zone records and did not find
 - **`STPC` consumed exactly on all 75 parseable levels**, the same bar `MAP` and `TRAK`
   clear: object models (same format as `TRAK`), animation, and a file of 949 actor
   definitions whose extents are now known
@@ -46,9 +50,6 @@ Blocked or untouched:
 - Zone field `+0x50`, non-zero almost only on default zones, passed to `FUN_00454da0`
 - How the game decides which zone is active, and what the 335 point-shaped zone
   records mean as opposed to the 183 box-shaped ones
-- Whether `WalkingCroc`'s instance is the player spawn. It lands where Sailor Village
-  starts, but that is a plausible claim of exactly the kind this project has been wrong
-  about before; moving it and launching the game would settle it in two minutes
 
 Settled negatives, so they are not chased again:
 
@@ -58,7 +59,8 @@ Settled negatives, so they are not chased again:
   so it is a plane offset rather than an orientation index.
 - The `MAP` zone records are not object placements and hold no spawn point. Moving the
   one record per level that the loader singles out does not change where Croc arrives.
-  The real placements are a different `MAP` section entirely.
+  The real placements are a different `MAP` section entirely, and the spawn is the
+  `WalkingCroc` instance in it.
 - Object placements are **not** in `STPC`. Two rounds went looking for them there
   because that is where the object names are; `STPC` holds the actor *definitions*, and
   the instances that place them are in `MAP`. The names and the positions live in
@@ -88,15 +90,7 @@ Roughly in order of value per effort. Each has a first concrete action and a tes
 would say whether it worked, because the things that went wrong here went wrong by being
 plausible rather than by being untested.
 
-**1. Move an actor instance and launch the game.** Now that placements are readable, the
-cheapest possible experiment is also the most valuable: change one instance's position,
-rebuild the WAD, and see whether that object moves. It confirms the record end to end,
-and doing it to `WalkingCroc` answers the spawn-point question at the same time. First
-action: a `mod_actor.py` beside `mod_zone.py`, idempotent from `game/pristine/`. It works
-if the object is somewhere else in the running game, and it is the only method here that
-has ever caught an answer the other two agreed on.
-
-**2. Render an object.** The `STPC` model headers use the same sub-array sizes at the
+**1. Render an object.** The `STPC` model headers use the same sub-array sizes at the
 same offsets as `TRAK`, so the existing mesh decoder should read them with the header
 size changed from `0x80` to `0x88`. The model boundaries are corroborated twice over now:
 every non-null zone `+0x28` lands on one, and the walk that produces them consumes the
@@ -107,7 +101,7 @@ scaled mesh rather than noise. Watch for two differences: the extra `uint16` arr
 in each triangle into a pointer to a 20-byte entry in a table at `DAT_004b5a94`, so
 object materials may not index `TEXT` the way terrain does.
 
-**3. Find the model an actor uses.** This is what stands between placed objects and drawn
+**2. Find the model an actor uses.** This is what stands between placed objects and drawn
 objects. An instance points at an entry point inside its actor's payload, not at a model
 index, so the link runs through the actor. First action: take the `b0 00 00 00 d4 00 00 00`
 header that 84% of instances point at and find what reads it — those two words are
@@ -115,21 +109,21 @@ constant across most of the game, which makes them a shape rather than data. Cro
 against `STPC`'s model count per level: whatever the field is, it has to stay inside it.
 It works when each Sailor Village instance names a model and the mesh suits the label.
 
-**4. Blender add-on.** Terrain is fully decoded and objects now have positions, so a
+**3. Blender add-on.** Terrain is fully decoded and objects now have positions, so a
 first pass could show both. Worth starting before the format work is finished, because
 round-tripping a real edit through Blender will expose gaps that reading bytes will not.
 
-**5. Finish the zone story.** Two loose ends: which zone the game picks as Croc moves,
+**4. Finish the zone story.** Two loose ends: which zone the game picks as Croc moves,
 and what the 335 point-shaped records mean next to the 183 boxes. First action: find the
 readers of the zone array at `level+0x28c`, which should contain the containment test.
 Cheap, and it would confirm the box reading from the other direction. `+0x50` and
 `FUN_00454da0` fall out of the same search.
 
-**6. The two demo maps.** `t0i0m006` and `t0l1m002` fail `TRAK`, `MAP` and `STPC`. One
+**5. The two demo maps.** `t0i0m006` and `t0l1m002` fail `TRAK`, `MAP` and `STPC`. One
 variant probably explains all three, and fixing it would let every tool claim 77/77
 instead of 75/77.
 
-**7. The 44-byte `TRAK` render faces.** Layout known, meaning not. Not needed for
+**6. The 44-byte `TRAK` render faces.** Layout known, meaning not. Not needed for
 rendering, so this is only worth doing if something else comes to depend on it.
 
 ## What has and has not worked
@@ -143,8 +137,11 @@ Four methods, in rough order of how much they can settle:
    an index must stay inside its table, tiles must seam into a continuous surface, a
    parser must consume its chunk to the last byte. The exact-consumption test in
    particular has validated `TRAK`, `MAP` and `STPC`.
-3. **Change it and launch the game.** Slow, but it is the only method that has caught
-   a wrong answer the other two agreed on.
+3. **Change it and launch the game.** Slow, and it needs a human at the screen, but it
+   is the only method that has caught a wrong answer the other two agreed on — and the
+   only one that can promote a reading from "consistent with everything we can measure"
+   to settled. It confirmed the zone fields, and then the actor instances and the spawn
+   point.
 4. **Read the PS1 siblings' documentation.** `refs/PS1-BRender-Reverse` describes the
    same engine's PSX builds, and its section names are the PC ones with a different
    suffix. It handed over the `STPC` actors file and the actor instance record outright.

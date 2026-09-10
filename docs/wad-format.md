@@ -339,15 +339,20 @@ Three counts back it up, and the third is the one that carries weight:
 The PS1 build stores this same record — 0x40 bytes with the actor offset at `+0x18` — in
 its level file, which is where the reading came from before any of the above was checked.
 
-### Croc's spawn point, probably
+### Croc's spawn point — confirmed in the game
 
-`WalkingCroc` is instance 0 in Sailor Village and lands where the level starts. That is
-the best candidate yet for the player spawn, which an earlier round looked for in the
-zone records and did not find.
+`WalkingCroc` is instance 0 in Sailor Village, and **it is the player spawn**. Moving that
+instance to the trampoline's position at the far south end of the level, and moving
+`Gobbo King 1` to where Croc used to start, does exactly what the reading predicts: Croc
+arrives on the stone platform by the trampoline, and the Gobbo King is standing on the
+beach he used to appear on. `tools/mod_actor.py` performs that edit.
 
-It is **not** confirmed, and the way to confirm it is the cheap one that caught the last
-wrong answer here: move that instance and launch the game. Until someone does that, this
-is a plausible claim of exactly the kind this project has been burned by before.
+Both halves matter. Croc arriving somewhere else settles the spawn question, which an
+earlier round looked for in the zone records and did not find. The Gobbo arriving where
+Croc used to be settles the position fields for actors in general, not just for the one
+record the engine happens to spawn the player from.
+
+Only 13 bytes change to do it, and the file size does not move.
 
 ## TRAK — terrain mesh library
 
