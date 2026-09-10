@@ -352,6 +352,10 @@ earlier round looked for in the zone records and did not find. The Gobbo arrivin
 Croc used to be settles the position fields for actors in general, not just for the one
 record the engine happens to spawn the player from.
 
+Both land exactly on the intended spot rather than merely in the right area, which
+settles more than the choice of fields: the 4.12 fixed-point scale and the negated z are
+right too. A wrong divisor or an unnegated z would still have moved them, just not there.
+
 Only 13 bytes change to do it, and the file size does not move.
 
 ## TRAK — terrain mesh library
