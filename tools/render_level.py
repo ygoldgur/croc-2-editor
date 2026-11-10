@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 from matplotlib.collections import PolyCollection  # noqa: E402
 
+from croc2.chunks.trak import rect_corners  # noqa: E402
 from croc2.chunks import TextChunk  # noqa: E402
 from croc2.level import Level  # noqa: E402
 from croc2.paths import GAME_WADS, PRISTINE_WADS  # noqa: E402
@@ -208,6 +209,8 @@ def render_actors(level: Level, out_path: Path) -> tuple[int, int]:
     ax.imshow(np.clip(img / 255.0, 0, 1))
 
     inside = 0
+    with_model = 0
+    with_anim = 0
     for inst in level.map.instances:
         wx, wy, wz = inst.position
         if lo[0] <= wx <= hi[0] and lo[2] <= wz <= hi[2]:
@@ -219,7 +222,14 @@ def render_actors(level: Level, out_path: Path) -> tuple[int, int]:
                 color="black", linewidth=1.4, zorder=3)
         ax.plot([sx], [sz], marker="o", markersize=7, color="magenta",
                 markeredgecolor="black", zorder=4)
-        ax.annotate(f"{inst.index} {level.actor_name(inst)}", (sx, sz),
+        model = level.model_index_for(inst)
+        anim = level.animation_index_for(inst)
+        with_model += model is not None
+        with_anim += anim is not None
+        ms = f" m{model}" if model is not None else ""
+        a = f" a{anim}" if anim is not None else ""
+        suffix = f"{ms}{a}"
+        ax.annotate(f"{inst.index} {level.actor_name(inst)}{suffix}", (sx, sz),
                     textcoords="offset points", xytext=(8, -8), color="white",
                     fontsize=7, zorder=5,
                     bbox=dict(boxstyle="round,pad=0.15", fc="black", alpha=0.6))
@@ -227,12 +237,162 @@ def render_actors(level: Level, out_path: Path) -> tuple[int, int]:
     total = len(level.map.instances)
     actors = len(level.stpc.actors) if level.stpc else 0
     ax.set_title(f"{level.name} - {total} actor instances, {actors} actor definitions; "
-                 f"{inside} inside the terrain bounds")
+                 f"{inside} inside the terrain bounds, {with_model} with a model, "
+                 f"{with_anim} with an animation")
     ax.set_axis_off()
     fig.tight_layout()
     fig.savefig(out_path)
     plt.close(fig)
     return total, inside
+
+
+def _rotate_actor(v: np.ndarray, rotation: tuple[int, int, int]) -> np.ndarray:
+    """Rotate one local-space vertex by actor binary angles (X, Y, Z)."""
+    ax, ay, az = (r / 0x1000 * math.tau for r in rotation)
+    x, y, z = v
+    cx, sx = math.cos(ax), math.sin(ax)
+    cy, sy = math.cos(ay), math.sin(ay)
+    cz, sz = math.cos(az), math.sin(az)
+    # X
+    y, z = y * cx - z * sx, y * sx + z * cx
+    # Y
+    x, z = x * cy + z * sy, -x * sy + z * cy
+    # Z
+    x, y = x * cz - y * sz, x * sz + y * cz
+    return np.array((x, y, z), dtype=np.float64)
+
+
+def _marker_faces(base: int) -> list[tuple[tuple[int, ...], int, int]]:
+    """Small tetra marker for unresolved/non-renderable actor instances."""
+    return [
+        ((base + 0, base + 1, base + 2), -1, 0),
+        ((base + 0, base + 2, base + 3), -1, 0),
+        ((base + 0, base + 3, base + 1), -1, 0),
+        ((base + 1, base + 3, base + 2), -1, 0),
+    ]
+
+
+def build_scene(level: Level) -> tuple[np.ndarray, list[tuple[tuple[int, ...], int, int]], int, int]:
+    """Compose terrain + placed STPC instance geometry."""
+    if level.stpc is None or level.stpc_payload is None:
+        raise ValueError("STPC not available for this level")
+
+    pages = _page_images(level.text)
+    entries = level.text.entries
+
+    positions, terrain_faces = level.world_faces()
+    scene_pts = [np.array(p, dtype=np.float64) for p in positions]
+    # (indices, texture_id, uv_offset)
+    faces: list[tuple[tuple[int, ...], int, int]] = [(idx, tex, 0) for idx, tex in terrain_faces]
+
+    rendered_models = 0
+    marker_actors = 0
+    model_cache: dict[int, object] = {}
+
+    for inst in level.map.instances:
+        model_idx = level.model_index_for(inst)
+        if model_idx is None or model_idx >= len(level.stpc.models):
+            marker_actors += 1
+            base = len(scene_pts)
+            x, y, z = inst.position
+            # Tiny arrowhead marker, oriented by yaw.
+            yaw = math.radians(inst.degrees[1])
+            forward = np.array((math.sin(yaw), 0.0, math.cos(yaw)))
+            right = np.array((forward[2], 0.0, -forward[0]))
+            scene_pts.extend([
+                np.array((x, y + 0.05, z)) + forward * 0.12,
+                np.array((x, y + 0.02, z)) - forward * 0.08 + right * 0.06,
+                np.array((x, y + 0.00, z)) - forward * 0.08 - right * 0.06,
+                np.array((x, y + 0.16, z)),
+            ])
+            faces.extend(_marker_faces(base))
+            continue
+
+        key = (model_idx, level.animation_index_for(inst))
+        if key not in model_cache:
+            try:
+                model_cache[key] = level.posed_model(*key)
+            except Exception:
+                model_cache[key] = None
+        if model_cache[key] is None:
+            marker_actors += 1
+            base = len(scene_pts)
+            x, y, z = inst.position
+            yaw = math.radians(inst.degrees[1])
+            forward = np.array((math.sin(yaw), 0.0, math.cos(yaw)))
+            right = np.array((forward[2], 0.0, -forward[0]))
+            scene_pts.extend([
+                np.array((x, y + 0.05, z)) + forward * 0.12,
+                np.array((x, y + 0.02, z)) - forward * 0.08 + right * 0.06,
+                np.array((x, y + 0.00, z)) - forward * 0.08 - right * 0.06,
+                np.array((x, y + 0.16, z)),
+            ])
+            faces.extend(_marker_faces(base))
+            continue
+        model, posed, soft = model_cache[key]
+        base = len(scene_pts)
+        x, y, z = inst.position
+        rotation = inst.rotation
+
+        # STPC models are mirrored in X; unmirror, then apply instance transform.
+        for vx, vy, vz in posed:
+            local = np.array((-vx, vy, vz), dtype=np.float64)
+            world = _rotate_actor(local, rotation) + np.array((x, y, z))
+            scene_pts.append(world)
+
+        for face in model.faces:
+            if face.texture_id >= len(entries) or soft.intersection(face.indices):
+                continue
+            # Unmirroring reverses winding. Reverse corners and apply the tested UV shift.
+            idx = tuple(base + i for i in reversed(face.indices))
+            faces.append((idx, face.texture_id, 2, True))
+        rendered_models += 1
+
+    return np.asarray(scene_pts), faces, rendered_models, marker_actors
+
+
+def render_scene(level: Level, out_path: Path) -> tuple[int, int, int]:
+    """Top-down textured terrain plus placed object meshes and actor markers."""
+    pts, faces, rendered_models, marker_actors = build_scene(level)
+    pages = _page_images(level.text)
+    entries = level.text.entries
+    lo, hi = pts.min(axis=0), pts.max(axis=0)
+    scale = RESOLUTION / max(hi[0] - lo[0], hi[2] - lo[2])
+    width = int((hi[0] - lo[0]) * scale) + 1
+    height = int((hi[2] - lo[2]) * scale) + 1
+    img = np.zeros((height, width, 3), np.float32)
+    zbuf = np.full((height, width), -1e9, np.float32)
+
+    drawn = 0
+    for indices, texture_id, uv_offset, *flat in faces:
+        if texture_id < 0:
+            # Flat magenta marker.
+            corner = [pts[i] for i in indices]
+            screen = [((c[0] - lo[0]) * scale, (c[2] - lo[2]) * scale) for c in corner]
+            depths = [c[1] for c in corner]
+            _raster(img, zbuf, screen, [(0, 0), (0, 0), (0, 0)], depths,
+                    np.array([[[255, 0, 255]]], dtype=np.float32))
+            drawn += 1
+            continue
+        entry = entries[texture_id]
+        if entry.has_texture:
+            page = pages[entry.page]
+        elif flat and flat[0]:
+            page = np.asarray(entry.colour, np.float32).reshape(1, 1, 3)
+        else:
+            continue
+        corner = [pts[i] for i in indices]
+        screen = [((c[0] - lo[0]) * scale, (c[2] - lo[2]) * scale) for c in corner]
+        depths = [c[1] for c in corner]
+        uvs = rect_corners(entry, uv_offset)[:len(indices)]
+        fan = [(0, 1, 2), (0, 2, 3)] if len(indices) == 4 else [(0, 1, 2)]
+        for tri in fan:
+            _raster(img, zbuf, [screen[i] for i in tri], [uvs[i] for i in tri],
+                    [depths[i] for i in tri], page)
+        drawn += 1
+
+    plt.imsave(out_path, np.clip(img / 255.0, 0, 1))
+    return rendered_models, marker_actors, drawn
 
 
 def _textured_image(level: Level, pts, lo, scale):
@@ -268,7 +428,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("levels", nargs="+", help="level stem, e.g. t1l1m001")
     ap.add_argument("--mode",
-                    choices=("height", "texture", "textured", "zones", "actors"),
+                    choices=("height", "texture", "textured", "zones", "actors", "scene"),
                     default="textured", help="how to colour the map")
     ap.add_argument("--from-game", action="store_true",
                     help="read the writable copy the game loads, not the pristine one, "
@@ -293,6 +453,11 @@ def main() -> int:
         elif args.mode == "actors":
             total, inside = render_actors(level, png)
             print(f"  drew {total} actor instances, {inside} inside the terrain bounds")
+        elif args.mode == "scene":
+            rendered, markers, drawn = render_scene(level, png)
+            print(f"  drew {rendered} placed models (articulated ones in their first "
+                  f"animation's first frame) and {markers} actor markers")
+            print(f"  rasterised {drawn} total scene faces")
         elif args.mode == "textured":
             drawn, untextured = render_textured(level, png)
             print(f"  rasterised {drawn} faces, {untextured} carry no texture")

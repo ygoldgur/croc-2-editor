@@ -38,7 +38,10 @@ SPAWN_ACTOR = "WalkingCroc"
 
 def load(level: str):
     """Parse a level far enough to reach its actor instances, from pristine bytes."""
-    original = (PRISTINE / f"{level}.wad").read_bytes()
+    return parse((PRISTINE / f"{level}.wad").read_bytes())
+
+
+def parse(original: bytes):
     wad = Wad.from_bytes(original)
     trak_payload = wad.get("TRAK").payload
     count = struct.unpack_from("<I", trak_payload, 0)[0]

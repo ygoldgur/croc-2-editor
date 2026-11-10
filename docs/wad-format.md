@@ -36,6 +36,8 @@ Level chunks, in order: `INFO VERS WFPC SMPC AMPC TEXT SPRT FONT TRAK STPC MAP L
 LGPC END`. `SMPC`/`AMPC` (audio) and `RIMG` are not present in every level.
 
 `defanim.wad` and `fesound.wad` are not chunk containers and are handled as raw blobs.
+`defanim.wad` turns out to be Croc's own animations, in exactly `STPC`'s animation record
+format — see [Animation records](#animation-records).
 
 ## LGHT — lights
 
@@ -493,6 +495,13 @@ rectangle whose corners the face's corners map onto.
 46,524 entries; `0xFF` marks a face with no texture (7,191 of them game-wide). The
 fourth byte is `0xFF` throughout.
 
+A face with no page is **flat-coloured**, and `u0, u1, v0` are its RGB. That is read off
+the art rather than the code: a Gobbo's fur faces select an entry reading
+`(255, 100, 0)`, its hat and mouth `(154, 0, 0)`, its eye whites `(255, 255, 255)`, and
+drawn that way the model comes out in the right colours. `v1` is a small number (0–5)
+of unknown meaning. Most Gobbo geometry is flat-coloured, which is why skipping these
+faces drew a floating head. `TextureEntry.colour` returns the triple.
+
 ## STPC — object models, animation, and the actors
 
 The largest chunk, 0.5 to 2.7 MB per level. It is not read field by field. The loader
@@ -526,7 +535,7 @@ exactly the offsets, of the terrain meshes in `TRAK`:
 +0x6e  uint16 triangle_count   -> triangle_count * 28  the render triangles
 +0x78  uint16 quad_count
 +0x7a  uint16 extra_count      -> (quad + extra) * 44  render faces
-+0x82  uint16 count            -> count * 2            an extra array TRAK has no room for
++0x82  uint16 part_count       -> part_count * 2       vertices per part; TRAK has no room
 ```
 
 The arrays follow the header in the order the fixup helper allocates them, and it writes
@@ -548,9 +557,11 @@ that the loader overwrites with `DAT_004b5a94 + n * 0x14`.
 **That table is `TEXT`'s.** It is filled by a loader that reads a `uint16` and six bytes
 per entry — the same eight bytes as a `TEXT` atlas entry — and scatters them into 20-byte
 structs, and later code indexes it for the page number and the u/v pair exactly as the
-terrain renderer does. So object materials index the same texture table as terrain, and
-objects can be textured with the existing machinery. This settles a worry left open in an
-earlier round, which was that they might not.
+terrain renderer does. So object materials index the same texture table as terrain.
+What differs is orientation: static STPC models are stored mirrored in X versus the
+terrain/world convention, so rendering them correctly applies three steps together:
+negate X, reverse face winding, and start UV corners at `+2` (equivalent to `ABCD ->
+CDAB` in the old corner labels).
 
 ### Two kinds of model, and the split is visible before rendering
 
@@ -566,24 +577,98 @@ The first row is the same standard `TRAK`'s meshes meet, and it is what says the
 above is right rather than merely plausible. Vertex normals are unit length on 99.88% of
 the first group.
 
-The second row is not a decoding failure so much as an unfinished job. Those models are
-**articulated**: their stored vertices do not fill the bounding box the header declares,
-and normals computed from the raw positions disagree with the stored ones — which is what
-happens when a model's parts each still need a transform applied. Rendered raw, they come
-out as a heap of pieces near the origin. The transforms are presumably what the animation
-section holds, and the extra `uint16` array is presumably the part table, but neither is
-decoded. `tools/render_object.py` leaves them out unless asked.
+The second row is not a decoding failure. Those models are **articulated**, and the
+numbers are what raw articulated data looks like; posed, they pass (next section).
 
 The extra array and the 44-byte faces are close to mutually exclusive, which is worth
 noting for whoever picks this up: 1,083 models have neither, 513 have only faces, 499 have
 only the extra array, and 22 have both.
 
-### Some object models are invisible
+### Articulated models: the part table
+
+The `+0x82` array is the part table: **one `uint16` per part, the number of consecutive
+vertices that part owns**, in vertex order. Each part's vertices are stored in that
+part's own local space, which is why they heap up at the origin when drawn raw. This is
+the PS1 build's "vertex groups", stored as a count table instead of a per-vertex index:
+the PC vertex is six floats with no room for one.
+
+The counts sum to `vertex_count` exactly on 438 of the 521 models. On the other 83 they
+fall short, and the vertices past the last part are **soft vertices**, which the animation
+places separately (below). Croc is the main case: 5 parts own 308 of his 447 vertices.
+
+Three things say this reading is right. The part counts are exactly the per-frame matrix
+counts the animations use — Sailor Village's models have 4, 5 and 9 parts, and its 26
+animations place 4, 5 or 9 matrices per frame, nothing else. The soft-vertex count matches
+too: every animation that fits Croc's model carries data for exactly 139 vertices, his
+447 − 308. And posed, the stored face normals agree with the geometry again (below).
+
+### Animation records
+
+`FUN_00424ef0` walks the second section. Each record is a 0x20-byte header, then a body:
+
+```
++0x00  uint32 n0              -> n0 * 4 bytes, leading table (unknown)
++0x08  uint32 frame_count
++0x0C  uint32 gate_0c         -> if 0: frame_count * 8 bytes (unknown)
++0x10  uint32 soft_count      -> if non-zero: frame_count * 4 bytes (unknown)
+                                 then always frame_count * 4 bytes (unknown, mostly 0)
++0x18  uint32 part_count
+per frame:
+  soft-vertex data            frame 0: soft_count * 8 bytes; later frames
+                              soft_count * 2 bytes, padded to a word
+  part_count * 64 bytes       one 4x4 float matrix per part
+```
+
+The matrices are row-major and take **row vectors**: a part-local vertex goes to model
+space as `[x y z 1] · M`, translation in the fourth row. Every part has its own matrix
+in model space, not relative to a parent — no hierarchy needs walking. Across all 363,729
+matrices the fourth column is exactly `(0, 0, 0, 1)`. 76% are pure rotations; most of
+the rest are rotations with a per-axis scale between 0.34 and 3.2, which reads as squash
+and stretch, so the full 3×3 has to be applied rather than just its rotation.
+
+The soft-vertex data is **not decoded**. Frame 0's eight bytes per vertex look like three
+`int16` coordinates and a pad; the two bytes per vertex in later frames are mostly zero,
+which suggests packed deltas. No scale tried makes Croc fill his box, so for now soft
+vertices are left unplaced and the faces using them are not drawn.
+
+`defanim.wad` is a file of these same records, which is why it never parsed as a chunk
+container: a `uint32` byte count, `uint32` record count, another `uint32` byte count,
+then 72 records that consume the file exactly. Every one has 5 parts and 139 soft
+vertices — Croc's shared animations. `read_animation_file` reads it.
+
+### Posed models pass the normal test
+
+Vertices are stored part-local, but the face normals in the triangle records are stored
+in model space **for the pose the model was exported in**. So there is a test that the
+pose is right, not just plausible: pose the model by a frame, recompute each triangle's
+normal from its posed corners, and compare with the stored one. Raw, Sailor Village's
+Gobbo agrees on 2% of triangles; posed by animation 14 frame 0, on 100%.
+
+`StpcChunk.export_pose` searches every frame of every animation that fits a model, and
+`tools/survey.py` runs it game-wide over the 438 models without soft vertices:
+
+| | models |
+|---|---|
+| some frame reproduces every stored face normal | 199 |
+| some frame reproduces at least 95% | 4 |
+| best frame reproduces less | 140 |
+| no animation in the level fits | 95 |
+
+A 100% match cannot happen by chance with hundreds of triangles, so the 199 settle the
+matrix convention and the part table. The 140 are most likely models exported in a pose
+no shipped frame reproduces: Sailor Village's Clipboard Gobbo matches 77% at best, and
+rendered, it is a whole, correctly coloured Gobbo holding its clipboard. Bounding boxes
+are a weaker test and not used: 150 models fill theirs exactly in frame 0, but a box can
+also have been authored from a pose that never ships.
+
+### Some object models are only flat-coloured
 
 Three of Sailor Village's 28 models have no textured faces at all — every face selects
-the `0xFF` no-page marker. They are collision geometry, which the level's actor names
-corroborate: one of them is `tramp collider`. A renderer that skips untextured faces draws
-nothing for these, so it is worth reporting them rather than showing an empty frame.
+an entry with no page. This was first read as collision geometry, on the strength of a
+`tramp collider` actor. That was wrong for at least two of them: a no-page entry carries
+a flat RGB colour (see `TEXT`), and drawn in it they are a pair of binoculars and a
+yellow jigsaw piece. The third, eight vertices and 1.4 tiles across, may still be the
+collider.
 
 ### What the props are
 
@@ -591,12 +676,10 @@ The static models come out as recognisable Croc 2 objects, and they match the ac
 in the same level: the red `?` crate against `Smash Box toolbox`, a purple pot against
 `Hub 1 Heart Pot`, a red heart pickup, two purple trampoline surfaces against
 `trampoline`, a lettered clipboard against `Clipboard Gobbo`, and four wooden doors
-against the level's five `CBKDoorTrigger` instances. Correct UVs on a crate face are hard
-to get by accident.
-
-What is still missing is the link from a placed object to its model. An actor instance
-points into its actor's payload, not at a model index, so we can say where every object
-stands and what every model looks like, without yet knowing which is which.
+against the level's five `CBKDoorTrigger` instances. The orientation fix above is
+observable on live art: the crate face assembles with the frame on the perimeter (not
+through the middle), and the board reads `Welcome to oki-doki` under the corrected
+object convention.
 
 This also explains something left dangling in the `TRAK` notes: the two `uint32` zeros
 at `+0x70` and `+0x74` in every terrain model header. They are pointer slots, and this
@@ -605,9 +688,6 @@ the extra array and its pointer.
 
 So the object meshes are in the same format as the terrain meshes, and the existing
 `TRAK` decoder should read them with only the header size changed.
-
-`FUN_00424ef0` walks the second section: 0x20-byte headers with nested per-item arrays
-ending in 64-byte blocks, which is the shape of animation data.
 
 ### The actors file
 
@@ -657,8 +737,111 @@ themselves bytecode is now the open question, and the PS1 documentation's "Argon
 Strategy Language" says they are.
 
 The chunk is fully consumed and each actor's extent is known, but what is *inside* an
-actor is not. That is where object types, links and behaviour live, and it is the last
-large unknown in the level format.
+actor is mostly not. That is where object types, links and behaviour live, and it is
+the last large unknown in the level format.
+
+### Actors name their models and animations
+
+One thing inside an actor is decoded. The payloads are bytecode, and the word `124`
+pushes the word after it as an immediate. When that immediate is the **absolute `STPC`
+offset of a model or animation header**, the actor is naming that record. Entry points
+open with it — Clipboard Gobbo's two entries both begin:
+
+```
+176 212 <n> 124 <model 6>  22 5 7
+            124 <anim 9>   18 5 3
+            124 <anim 10>  18 5 4    ... and so on through anim 13
+```
+
+With the opcodes decoded (next section) that reads: set the model to 6, then store each
+animation into a local variable. The pattern was trusted before a game test, and a
+game test has since confirmed it (below):
+
+- **every one of the game's 1,380 animations** is pushed this way by some actor
+  (`tools/survey.py` fails if one is not), as are 1,982 of the 2,117 models;
+- each actor claims a consecutive run, in file order — Sailor Village's Gobbo King owns
+  model 1 and animation 5, Clipboard Gobbo model 6 and animations 9–13, Gobbo Says model 9
+  and 14–17, Distressed Gobbo models 12–14 and 18–24;
+- the animations an actor pushes fit the model it pushes: same part count, same soft
+  vertex count. Of the 836 instances whose model is articulated, 796 have one;
+- WalkingCroc, the 52 KB actor, pushes exactly the five Croc animations its level ships.
+
+**Confirmed in game.** `tools/mod_model.py --map 12=9 13=6` rewrote the Distressed
+Gobbo's pushes of models 12 and 13 to Gobbo Says' model (purple box hat) and
+Clipboard Gobbo's model. Every Distressed Gobbo seen turned into the Clipboard Gobbo,
+and none took the purple hat. So the pushes really are the models. "First push"
+(model 12) was the wrong choice, though: the entry code picks between them.
+
+This replaced a signature-and-offset heuristic that read a field at a fixed distance
+from the entry point. That gave the same number as the model and the animation for most
+instances, and drew Croc's mesh on every door trigger.
+
+### The actor VM
+
+The bytecode runs on a stack machine in `Croc2.exe`. The handler for opcode *n* is the
+pointer at `0x4af340 + 4n` (file offset `0xaf340`, in `.data`). Ghidra made none of the
+handlers into functions, because nothing calls them directly, so they are missing from
+`decompiled.c`; disassemble them with `objdump -d --start-address=...` instead. The VM
+object holds pc at `+0xc`, the stack pointer at `+0xf8`, the locals through `+0xe4` and
+the model at `+0x10`. Numbers are 20.12 fixed point.
+
+| op | operands | effect |
+|---|---|---|
+| 10, 180 | n | push n |
+| 124 | off | push `STPC + off` (negative: a global table), then rewrite itself to `10` |
+| 1 | n | push local n |
+| 5 | n | push the address of local n |
+| 2 / 6 | n | push the code word / its address, n words past the operand |
+| 4 | n | push actor property n (`FUN_00485010`) |
+| 18 | | pop value, pop address, store |
+| 14 | | add |
+| 118 | | floor (clear the 12 fraction bits) |
+| 152 | | pop n, push a random number below n (MSVC `rand`) |
+| 137 | off | switch: pop a value, look it up in the case table `off` words on |
+| 132 | n | jump n words |
+| 126 | n | call: push the return address, jump n words |
+| 22 | | pop a model pointer into the model |
+| 176 | a, b | opens every entry; b sets a code pointer at `+0x18` |
+| 111, 161, 177, 226 | n | set actor flags |
+
+A case table is a count followed by `(10, value, target)` triples, where target is
+counted in words from after the switch operand. If no case matches, execution falls
+through.
+
+The Distressed Gobbo's entry, decoded:
+
+```
+x = floor(rand(2.0) + 0.5) + 1          1, 2 or 3: a quarter, a half, a quarter
+switch x: 1 -> model 12, 2 -> model 13, 3 -> model 14;  local 18 = x
+```
+
+`croc2/vm.py` follows entry code through these opcodes, carrying random values as
+distributions, until each branch sets a model. `StpcChunk.instance_models` returns the
+resulting chances, and `instance_model` the likeliest. For the Gobbo that is 13, and
+the game agrees. The walk completes for 2,041 of the 3,205 instances. The rest stop at
+an opcode that is not decoded, and fall back to the first model pushed at or after the
+entry point (or anywhere in the actor). That fallback agrees with the walk on 2,033 of
+the 2,041 instances it can be checked against. The disagreements are the 6 random
+Gobbos and 2 `PushableIceBlock`s, whose entry stores two models in locals and sets the
+second.
+
+The fallback is still a guess. One Distressed Gobbo (instance 9, entry `+5024`) never
+sets a model in its entry code. The fallback gives it model 12, but it did not show up
+in a purple hat when 12 was swapped, so its model comes from somewhere not yet traced.
+Which animation plays first is not decoded either: `StpcChunk.instance_animations`
+returns the fitting ones in code order, and the tools use the first.
+
+**The switch is confirmed in game.** `tools/mod_model.py --word 756=1` made the draw
+`rand(1)`, which is always 0. Every Distressed Gobbo then wore model 12's red hat, as
+the walk predicts.
+
+The draw is random in the code but fixed in practice. `rand` is MSVC's LCG, with its
+state at `0x4b0f40`. The state starts at 1, and nothing but `rand` itself touches it:
+the game never calls `srand`. So every boot replays the same numbers, which is why
+the Gobbos look the same after a restart. That the six of them all landed on 13 is just
+where the sequence happened to fall. `instance_model` returns the likeliest branch,
+which happens to match the game here. Predicting the actual draw would mean counting
+every `rand` call (46 call sites) made before the level is set up.
 
 ## Level addressing
 

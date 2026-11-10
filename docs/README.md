@@ -25,6 +25,21 @@ Working:
 - **Object models decode and render**, textured, from the same `TEXT` table terrain uses.
   The 1,596 static models pass the `TRAK` tests exactly: every face normal matches its
   geometry, every declared bounding box matches its vertices
+- **Articulated models pose and animate.** The `+0x82` array is a part table (vertices
+  per part), and each animation frame is one model-space matrix per part. Posed in the
+  right frame, 199 models reproduce every stored face normal, which no wrong pose does by
+  chance. Sailor Village's Gobbos, the King and Croc render whole and move
+- **Actors name their models and animations**: actor bytecode pushes the `STPC` offset of
+  each record it uses, confirmed in game. Every animation in the game is named this
+  way, so the scene draws its characters
+- **Actor bytecode runs on a VM whose handler table is found** (`0x4af340`). About twenty
+  opcodes are decoded, enough to run 2,041 of 3,205 instances' entry code to the
+  model it sets. The Distressed Gobbo picks models 12, 13 or 14 with `rand`, 13 half the
+  time. The game shows 13 on every boot, because `rand` is never seeded. Forcing the
+  draw to 0 turned every one into model 12 in game, which confirms the switch
+- Faces with no texture page are flat-coloured, and the colour is in the `TEXT` entry.
+  Most of a Gobbo is flat-coloured
+- `defanim.wad` is Croc's 72 shared animations, in `STPC`'s animation record format
 - Level logic is data, not engine code: per-level named scripts and triggers ship in
   the WAD, which answers the long-open scripting question
 - Zone `+0x28` points at an `STPC` model: all 165 non-null offsets land exactly on a
@@ -41,18 +56,20 @@ Working:
 
 Blocked or untouched:
 
-- **What is inside an actor.** Each of the 949 actor definitions is a size-prefixed blob
-  whose extent we know and whose contents we do not. Object types, links and behaviour
-  are in there, and the PS1 documentation calls it Argonaut Strategy Language. This is
-  now the last large unknown in the level format
-- **Which model a placed object uses.** Positions are known and meshes are known, but not
-  the link between them: an instance points at an entry point inside its actor's payload,
-  not at a model index. This is the one thing standing between the two and a level that
-  draws its objects
-- The 521 articulated models, whose parts need transforms this decoder does not apply.
-  Their vertices do not fill the header's bounding box and their computed normals disagree
-  with the stored ones. The transforms are presumably in the animation section, and the
-  extra `uint16` array at `+0x82` is presumably the part table
+- **What is inside an actor.** Each of the 949 actor definitions is a bytecode blob
+  (Argonaut Strategy Language, per the PS1 documentation). The opcodes on the way to
+  setting a model are decoded (`croc2/vm.py`); the remaining ~270 are where object
+  types, links and behaviour live, and they are the last large unknown in the level
+  format. 1,164 instances fall back to guessing their model as the first one pushed
+- **Which animation plays first.** An instance's actor names several that fit its model;
+  the tools use the first in code order, which is not known to be the one the game
+  starts with
+- **Soft vertices.** 83 models, Croc's included, have vertices outside every part, with
+  per-frame data in the animation that is not decoded. Their faces are left undrawn, so
+  Croc renders with holes
+- 140 articulated models have no frame that reproduces all their face normals, probably
+  because they were exported in a pose that does not ship. They render whole regardless;
+  95 have no animation in their level that fits
 - `t0i0m006` and `t0l1m002` use a `TRAK` variant we reject, and also fail the `MAP`
   and `STPC` walks
 - The 44-byte `TRAK` records: layout known, meaning not. Not needed for rendering
@@ -78,8 +95,15 @@ Settled negatives, so they are not chased again:
   concluded. `STPC` carries per-level named scripts and triggers: `setting level flag 6`,
   `Topdialog off`, `level flag 2 was set`, `lll open` / `lll not open`.
 - `STPC` as a whole is not one bytecode stream. It is mostly models and animation, with
-  the logic in a file of named actors. Whether an individual actor's payload is bytecode
-  is still open, and the PS1 documentation suggests it is.
+  the logic in a file of named actors, whose payloads are bytecode.
+- Untextured object faces are **not** collision geometry. They are flat-coloured, and
+  skipping them is what made the first Gobbo renders look like floating heads and turned a
+  jigsaw piece and a pair of binoculars into "collision only" models.
+- Animation matrices are **not** relative to a rest pose or a parent part. The first
+  renderer multiplied by the inverse of frame 0, which cancels the transform and draws
+  the raw heap of parts; each matrix maps its part straight into model space.
+- Vertices are **not** assigned to parts by nearness. The part table gives contiguous
+  runs; nearest-translation clustering put limbs on the wrong parts.
 
 Ghidra runs in a container, so the host needs no JDK and nothing lands in the repo:
 
@@ -88,9 +112,12 @@ Ghidra runs in a container, so the host needs no JDK and nothing lands in the re
 ```
 
 It mounts `Croc2.exe` read-only, caches the analysed project in `ghidra/project/`, and
-writes `ghidra/out/decompiled.c` — 872 functions, all of them, which is small enough to
-grep. Chunk ids appear in the code as 32-bit immediates (`MAP ` is `0x4d415020`), and
+writes `ghidra/out/decompiled.c` — the 872 functions Ghidra found, which is small enough
+to grep. Chunk ids appear in the code as 32-bit immediates (`MAP ` is `0x4d415020`), and
 searching for one leads straight to its loader. Set `CROC2_EXE` if your install differs.
+Code reached only through a pointer table is missing: none of the actor VM's opcode
+handlers are there. The host's `objdump -d --x86-asm-syntax=intel
+--start-address=0x... Croc2.exe` disassembles them directly.
 The image is pinned to amd64: Ghidra ships no arm64 decompiler, so it runs emulated.
 
 ## Next steps
@@ -99,27 +126,25 @@ Roughly in order of value per effort. Each has a first concrete action and a tes
 would say whether it worked, because the things that went wrong here went wrong by being
 plausible rather than by being untested.
 
-**1. Find the model an actor uses.** This is the last thing between placed objects and
-drawn ones, now that both ends exist. An instance points at an entry point inside its
-actor's payload, not at a model index, so the link runs through the actor. First action:
-take the `b0 00 00 00 d4 00 00 00` header that 84% of instances point at and find what
-reads it — those two words are constant across most of the game, which makes them a shape
-rather than data. Cross-check against `STPC`'s model count per level: whatever the field
-is, it has to stay inside it. It works when each Sailor Village instance names a model and
-the mesh suits the label — the level has a `?` crate, a heart pot and a trampoline in both
-lists, so the answer is checkable by eye.
+**1. Decode more actor opcodes.** The model link is confirmed in game, and the entry
+walk resolves 2,041 instances. The 1,164 it cannot finish stop mostly at opcodes 121,
+16, 57, 254, 126, 73, 19, 35 and 79 (`tools/survey.py` counts the walks that finish). First
+action: disassemble those handlers from the table at file offset `0xaf340` and add the
+ones with a plain stack effect to `croc2/vm.py`. It works when the evaluated count goes
+up with no new survey problems. The same walk, carried past `SET_MODEL`, should show
+which animation an entry starts. Two things still need a game test: Distressed Gobbo
+instance 9 (entry `+5024`, which sets no model), and the first animation.
 
-**2. Transform the articulated models.** 521 of 2,117 models have parts that still need
-placing; they are the characters, so this is what stands between a static diorama and
-something that looks like the game. First action: find what consumes the extra `uint16`
-array at `+0x82`, whose pointer the loader stores at `+0x84`. It works when a Gobbo's
-vertices fill the bounding box its own header declares, which is a test that needs no
-rendering and currently fails on 99% of these.
+**2. Decode the soft vertices.** This is what Croc still lacks. Frame 0 carries 8 bytes
+per soft vertex, three `int16`s and a pad; later frames 2 bytes each. First action: find
+the code that reads `+0x10` of an animation record, near `FUN_00424ef0`'s callers. It
+works when Croc's posed mesh closes up, with no stretched or missing faces, and fills
+his declared bounding box.
 
-**3. Blender add-on.** Terrain is fully decoded, objects have positions, and static object
-meshes decode, so a first pass could show all three. Worth starting before the format work
-is finished, because round-tripping a real edit through Blender will expose gaps that
-reading bytes will not.
+**3. Blender add-on.** Terrain, object placements, static meshes and posed, animated
+characters all decode now, so a first pass could show a level much as the game does.
+Worth starting before the format work is finished, because round-tripping a real edit
+through Blender will expose gaps that reading bytes will not.
 
 **4. Finish the zone story.** Two loose ends: which zone the game picks as Croc moves,
 and what the 335 point-shaped records mean next to the 183 boxes. First action: find the
@@ -174,7 +199,9 @@ Two cautions earned the hard way, both worth re-reading before trusting a result
   placements were skipped for two rounds because the search followed the object names
   into `STPC`, while the loader was relocating a pointer *out of* `MAP` into it. The
   relocation is the tell: a field the loader adds a base address to is a reference, and
-  chasing those found both the zone's model and the actor instances.
+  chasing those found both the zone's model and the actor instances. The same idea found
+  the actor-to-model link in a minute, after a round of fitting field offsets had not:
+  search the payload for the exact offsets of the records it might mean.
 
 ## Layout
 
@@ -182,12 +209,17 @@ Two cautions earned the hard way, both worth re-reading before trusting a result
 croc2/          format library
   wad.py        container
   chunks/       lght, map_ (tiles, zones, actor instances, section walk),
-                stpc (object models, animation, actors), trak, text
-  level.py      MAP placements + TRAK meshes -> world mesh, textured OBJ export
+                stpc (object models, part tables, animation records and posing,
+                actors and the records they name, defanim.wad), trak, text
+  level.py      MAP placements + TRAK meshes -> world mesh, textured OBJ export;
+                which model and animations each placed instance uses
+  vm.py         the actor bytecode opcodes decoded so far; runs an entry to its model
   png.py        stdlib-only PNG writer for texture pages
   paths.py      where the game data lives
 tools/          roundtrip, survey, render_level, render3d, mod_menu, wadinfo,
-                render_object (draws the STPC object meshes),
+                render_object (draws the STPC object meshes, articulated ones posed),
+                render_anim (one model through one animation, strip and GIF),
+                animprobe and modelprobe (exploratory dumps of those records),
                 mapwalk and stpcwalk (report whether the library's walks consume
                 their chunk exactly), zones (surveys the MAP zone records),
                 mod_zone (fog test), mod_actor (moves objects, spawn included)
@@ -208,6 +240,7 @@ python3 tools/render_level.py t1l1m001  # textured OBJ + MTL + pages + PNG into 
 python3 tools/render_level.py t1l1m001 --mode height    # coloured by elevation instead
 python3 tools/render_level.py t1l1m001 --mode zones     # zone boxes drawn over the map
 python3 tools/render_level.py t1l1m001 --mode actors    # actor instances, named
+python3 tools/render_level.py t1l1m001 --mode scene     # terrain plus posed objects
 python3 tools/render3d.py t1l1m001 --target 10.4 1.0 -8.5 --yaw 180 --pitch 25 --dist 7
 python3 tools/wadinfo.py <file.wad>     # chunk layout of one file
 ```
@@ -215,11 +248,20 @@ python3 tools/wadinfo.py <file.wad>     # chunk layout of one file
 The objects out of `STPC`, textured, from an orbiting camera:
 
 ```sh
-python3 tools/render_object.py t1l1m001            # a montage of the static models
-python3 tools/render_object.py t1l1m001 --list     # sizes, and which are articulated
+python3 tools/render_object.py t1l1m001            # a montage of the models
+python3 tools/render_object.py t1l1m001 --list     # sizes, articulated ones' export pose
 python3 tools/render_object.py t1l1m001 --model 8 --obj   # one model, large, plus OBJ
-python3 tools/render_object.py t1l1m001 --articulated     # include the ones we cannot
-                                                         # yet place the parts of
+python3 tools/render_object.py t1l1m001 --raw      # articulated models unposed
+```
+
+Characters, through their animations:
+
+```sh
+python3 tools/render_anim.py t1l1m001 --actor 8 --list    # what instance 8's actor names
+python3 tools/render_anim.py t1l1m001 --actor 8 --gif     # its model, first animation
+python3 tools/render_anim.py t1l1m001 --actor 8 --anim 20 --gif   # another of its own
+python3 tools/render_anim.py t1l1m001 --model 9 --anim 14 # any model, any animation
+python3 tools/render3d.py t1l1m001 --scene --focus-index 8 --dist 0.9 --yaw 150
 ```
 
 Chunk walkers. Each reports whether it consumed its chunk exactly, which is the test
@@ -246,6 +288,11 @@ python3 tools/mod_actor.py t1l1m001 --list       # the level's actor instances
 python3 tools/mod_actor.py t1l1m001              # move Croc and a Gobbo; needs a human
 python3 tools/mod_actor.py t1l1m001 --move 2 12 1.5 -7.5    # one instance, by hand
 python3 tools/mod_actor.py t1l1m001 --restore
+python3 tools/mod_model.py t1l1m001              # its model 12 push made model 9
+python3 tools/mod_model.py t1l1m001 --map 12=9 13=6   # what proved the link
+python3 tools/mod_model.py t1l1m001 --word 756=1      # rand(1): what proved the switch
+python3 tools/mod_model.py t1l1m001 --all        # every model it names replaced
+python3 tools/mod_model.py t1l1m001 --restore
 ```
 
 After writing an edit, `render_level.py --from-game` reads the copy the game loads

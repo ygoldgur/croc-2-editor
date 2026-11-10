@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Survey LGHT, MAP, TRAK and STPC across every level: check decoders are complete."""
-import math
 import struct
 import sys
 from collections import Counter
@@ -9,7 +8,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from croc2 import Wad  # noqa: E402
 from croc2.chunks import LightChunk, MapChunk, TextChunk, TrakChunk, TrakParseError  # noqa: E402
-from croc2.chunks.stpc import GROUPS_FLAG, StpcChunk, StpcParseError  # noqa: E402
+from croc2.chunks.stpc import (GROUPS_FLAG, StpcChunk, StpcParseError,  # noqa: E402
+                                face_normal_agreement, read_animation_file)
 from croc2.paths import PRISTINE_WADS as WADS  # noqa: E402
 
 
@@ -19,20 +19,7 @@ def normal_matches(model) -> tuple[int, int]:
     A field can only pass this test if it really is the face normal, which is what
     pinned the TRAK triangle layout down and now says the same for STPC's models.
     """
-    ok = total = 0
-    for (a, b, c), fn in zip(model.triangles, model.face_normals):
-        pa, pb, pc = model.vertices[a], model.vertices[b], model.vertices[c]
-        u = [pb[k] - pa[k] for k in range(3)]
-        v = [pc[k] - pa[k] for k in range(3)]
-        g = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2],
-             u[0] * v[1] - u[1] * v[0]]
-        gl = math.sqrt(sum(t * t for t in g))
-        fl = math.sqrt(sum(t * t for t in fn))
-        if gl < 1e-9 or fl < 1e-9:
-            continue
-        total += 1
-        ok += sum(g[k] * fn[k] for k in range(3)) / (gl * fl) > 0.99
-    return ok, total
+    return face_normal_agreement(model.vertices, model.triangles, model.face_normals)
 
 
 def bbox_matches(model) -> bool:
@@ -70,6 +57,11 @@ def main() -> int:
     obj_models = Counter()
     obj_bbox = Counter()
     obj_normals = {"static": (0, 0), "articulated": (0, 0)}
+    posed = Counter()
+    pushed = Counter()
+
+    defanim = read_animation_file((WADS / "defanim.wad").read_bytes())
+    defanim_parts = Counter((a.part_count, a.soft_count) for a in defanim)
 
     for p in sorted(WADS.glob("*.wad")):
         wad = Wad.read(p)
@@ -139,10 +131,12 @@ def main() -> int:
         actors += len(stpc.actors)
 
         # Object models. The static ones - no extra uint16 array - must pass the same
-        # tests TRAK's meshes pass. The articulated ones are expected to fail them,
-        # because their parts still need a transform this decoder does not apply.
+        # tests TRAK's meshes pass. The articulated ones fail them raw, because their
+        # vertices are part-local; posed in the frame they were exported in, every
+        # stored face normal should agree with its geometry again.
+        payload = wad.get("STPC").payload
         for i, ref in enumerate(stpc.models):
-            model = stpc.model(wad.get("STPC").payload, i)
+            model = stpc.model(payload, i)
             kind = "articulated" if ref.extra_count else "static"
             obj_models[kind] += 1
             ok, total = normal_matches(model)
@@ -158,6 +152,40 @@ def main() -> int:
                 if not bbox_matches(model):
                     bad.append(f"{p.name}: static STPC model {i} does not fill its "
                                f"declared bounding box")
+            else:
+                counts = stpc.part_counts(payload, i)
+                soft = ref.vertex_count - sum(counts)
+                if soft < 0:
+                    bad.append(f"{p.name}: STPC model {i} parts claim {sum(counts)} "
+                               f"of {ref.vertex_count} vertices")
+                    continue
+                if soft:
+                    posed["soft vertices"] += 1
+                    posed["soft, fit by defanim"] += \
+                        defanim_parts[(len(counts), soft)] > 0
+                    continue
+                fit = stpc.export_pose(payload, i)
+                if fit is None:
+                    posed["no animation fits"] += 1
+                elif fit[0] == 1.0:
+                    posed["every normal"] += 1
+                elif fit[0] >= 0.95:
+                    posed[">=95%"] += 1
+                else:
+                    posed["<95%"] += 1
+
+        # Actors name their models and animations by pushing their header offsets.
+        # Every animation is named that way, so one that is not is a reading error.
+        named = {r.index for a in stpc.actors for r in stpc.references(a)
+                 if r.kind == "animation"}
+        pushed["animations"] += len(stpc.animations)
+        pushed["animations named"] += len(named)
+        if len(named) != len(stpc.animations):
+            bad.append(f"{p.name}: {len(stpc.animations) - len(named)} animations "
+                       f"no actor pushes")
+        pushed["models"] += len(stpc.models)
+        pushed["models named"] += len({r.index for a in stpc.actors
+                                       for r in stpc.references(a) if r.kind == "model"})
 
         # Actor instances: each must point inside an actor record, and stand on the
         # terrain. Anything that does not is a reading error, bar the odd camera.
@@ -169,7 +197,20 @@ def main() -> int:
         x0, x1, z0, z1 = terrain_footprint(placed.tiles)
         for inst in placed.instances:
             instances += 1
-            if stpc.actor_at(inst.actor_offset) is not None:
+            pushed["instances with a model"] += stpc.instance_model(inst.actor_offset) is not None
+            chances = stpc.instance_models(inst.actor_offset)
+            pushed["instances evaluated"] += bool(chances)
+            if chances and abs(sum(chances.values()) - 1) > 1e-9:
+                bad.append(f"{p.name}: instance {inst.index} model chances sum to "
+                           f"{sum(chances.values())}")
+            # The random switch, whose likeliest branch the game test confirmed.
+            actor = stpc.actor_at(inst.actor_offset)
+            if (p.stem == "t1l1m001" and actor is not None
+                    and actor.name == "Distressed Gobbo"
+                    and inst.actor_offset - actor.offset - 4 == 740
+                    and chances != {12: 0.25, 13: 0.5, 14: 0.25}):
+                bad.append(f"{p.name}: Distressed Gobbo {inst.index} chances {chances}")
+            if actor is not None:
                 resolved += 1
             else:
                 bad.append(f"{p.name}: instance {inst.index} offset "
@@ -200,6 +241,17 @@ def main() -> int:
         print(f"object models:   {n:>5} {kind:<12} "
               f"face normals match {100 * ok / max(total, 1):6.2f}%, "
               f"bbox exact {100 * obj_bbox[kind] / n:6.2f}%")
+    print(f"posed:           export pose reproduces every face normal on "
+          f"{posed['every normal']}, >=95% on {posed['>=95%']}, less on {posed['<95%']}; "
+          f"{posed['no animation fits']} with no animation that fits")
+    print(f"                 {posed['soft vertices']} with soft vertices (not decoded), "
+          f"{posed['soft, fit by defanim']} of them "
+          f"fit by defanim.wad")
+    print(f"defanim.wad:     {len(defanim)} animations, consumed exactly")
+    print(f"actors name:     {pushed['animations named']}/{pushed['animations']} animations, "
+          f"{pushed['models named']}/{pushed['models']} models; "
+          f"{pushed['instances with a model']}/{instances} instances find a model, "
+          f"{pushed['instances evaluated']} by running their entry code")
     print(f"light types:     {dict(light_types)}")
     print(f"LGHT leftover:   {dict(lght_trailing)}")
     print(f"tile rotations:  {{{', '.join(f'0x{k:X}: {v}' for k, v in sorted(rotations.items()))}}}")

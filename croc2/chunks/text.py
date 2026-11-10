@@ -77,6 +77,14 @@ class TextureEntry:
     v1: int
 
     @property
+    def colour(self) -> tuple[int, int, int] | None:
+        """A face with no page is flat-coloured: the bytes u0, u1, v0 are its RGB.
+
+        A Gobbo's fur reads (255, 100, 0) this way and its mouth (154, 0, 0).
+        """
+        return None if self.has_texture else (self.u0, self.u1, self.v0)
+
+    @property
     def width(self) -> int:
         return self.u1 - self.u0
 

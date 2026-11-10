@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .chunks import LightChunk, MapChunk, TextChunk, TrakChunk
-from .chunks.stpc import GROUPS_FLAG, Actor, StpcChunk, StpcParseError
+from .chunks.stpc import GROUPS_FLAG, Actor, StpcChunk, StpcParseError, pose
+from .chunks.trak import rect_corners
 from .png import write_png
 from .wad import Wad
 
@@ -22,6 +23,7 @@ class Level:
     lights: LightChunk
     text: TextChunk
     stpc: StpcChunk | None = None
+    stpc_payload: bytes | None = None
 
     @classmethod
     def load(cls, path) -> "Level":
@@ -41,6 +43,7 @@ class Level:
             lights=LightChunk.parse(wad.get("LGHT").payload),
             text=TextChunk.parse(wad.get("TEXT").payload),
             stpc=cls._stpc(wad, wfpc),
+            stpc_payload=wad.get("STPC").payload if wad.get("STPC") else None,
         )
 
     @staticmethod
@@ -62,6 +65,37 @@ class Level:
     def actor_name(self, instance) -> str:
         actor = self.actor_for(instance)
         return actor.name if actor else f"@{instance.actor_offset}"
+
+    def model_index_for(self, instance) -> int | None:
+        """The STPC model an instance most likely uses; see ``StpcChunk.instance_model``."""
+        if self.stpc is None:
+            return None
+        return self.stpc.instance_model(instance.actor_offset)
+
+    def animations_for(self, instance) -> list[int]:
+        """The animations an instance's actor pushes that fit its model."""
+        if self.stpc is None:
+            return []
+        return self.stpc.instance_animations(self.stpc_payload, instance.actor_offset)
+
+    def animation_index_for(self, instance) -> int | None:
+        """The first fitting animation the actor pushes; not known to be the first played."""
+        anims = self.animations_for(instance)
+        return anims[0] if anims else None
+
+    def posed_model(self, model_index: int, anim_index: int | None = None, frame: int = 0):
+        """A model's mesh and its vertices, posed by one animation frame if articulated.
+
+        Returns ``(model, positions, soft)``, where ``soft`` is the set of vertices left
+        unplaced because their per-frame data is not decoded; faces using them are wrong.
+        """
+        model = self.stpc.model(self.stpc_payload, model_index)
+        parts = self.stpc.vertex_parts(self.stpc_payload, model_index)
+        soft = {i for i, p in enumerate(parts) if p < 0}
+        if anim_index is None or not self.stpc.models[model_index].extra_count:
+            return model, list(model.vertices), soft
+        frames = self.stpc.animation_matrices(self.stpc_payload, anim_index)
+        return model, pose(model.vertices, parts, frames[frame % len(frames)]), soft
 
     def place(self, tile):
         """The tile's model vertices, rotated about Y and moved into world space.
@@ -96,15 +130,8 @@ class Level:
         return positions, faces
 
     def face_uvs(self, texture_id: int):
-        """The texture rectangle's corners, in the winding order faces use.
-
-        V runs opposite to the page's row order: corner 0 takes the rectangle's
-        *bottom* edge. Sailor Village has a signpost reading "Swap meet Pete"; viewed
-        along its own normal it comes out upside down under the other convention.
-        """
-        entry = self.text.entries[texture_id]
-        return [(entry.u0, entry.v1), (entry.u1, entry.v1),
-                (entry.u1, entry.v0), (entry.u0, entry.v0)]
+        """The texture rectangle's corners, in the winding order terrain faces use."""
+        return rect_corners(self.text.entries[texture_id])
 
     def write_textures(self, directory, stem: str) -> list[str]:
         """Dump the texture pages as PNGs and return their filenames."""

@@ -60,6 +60,24 @@ FACE_SIZE = 44
 QUAD_SECOND_HALF = 0x10  # triangle flag: this is the back half of a quad
 
 
+def rect_corners(entry, offset: int = 0):
+    """A texture rectangle's corners, in the order a face's corners take them.
+
+    V runs opposite to the page's row order, so corner 0 takes the rectangle's
+    *bottom* edge. Sailor Village's "Swap meet Pete" board is the only piece of level
+    art with writing on it, and of the eight ways to walk the rectangle it reads
+    upright and unmirrored under this one alone - photographed through render3d's
+    camera, which is the one checked against the world not coming out inside-out.
+
+    Terrain starts at corner 0. Object faces out of STPC start two corners round once
+    the object-model mirror is undone in the renderer.
+    """
+    corners = [(entry.u0, entry.v1), (entry.u1, entry.v1),
+               (entry.u1, entry.v0), (entry.u0, entry.v0)]
+    offset %= 4
+    return corners[offset:] + corners[:offset]
+
+
 @dataclass
 class Face:
     """A render face: three or four corner indices sharing one texture.
