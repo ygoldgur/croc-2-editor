@@ -9,6 +9,11 @@ Format details are in [wad-format.md](wad-format.md).
 
 Working:
 
+- **A Blender placement editor (version 1).** It imports a level as textured terrain
+  tiles and posed, coloured actors, lets you move and turn both, and saves into the WAD
+  the game loads. Saving rewrites transforms in place and reads the result back first;
+  an untouched level saves byte-identical on all 75 parseable levels. Moving actors is
+  confirmed in game; moving tiles sideways and turning actors are not yet
 - WAD container parse/write, byte-exact round-trip on all 79 WADs
 - `LGHT` fully decoded
 - `MAP` fully walked — every section consumed exactly on all 75 parseable levels
@@ -126,7 +131,20 @@ Roughly in order of value per effort. Each has a first concrete action and a tes
 would say whether it worked, because the things that went wrong here went wrong by being
 plausible rather than by being untested.
 
-**1. Decode more actor opcodes.** The model link is confirmed in game, and the entry
+**1. Game-test the editor's two untested edits.** Moving actors and lifting tiles are
+confirmed; two other edits are not. First, a tile moved sideways: the game has a second,
+fixed-point copy of each tile, presumably for collision, and the editor keeps it in step.
+It works when Croc can stand on the tile where it now is, and falls through the old
+spot. Second, an actor's rotation: the yaw sign and the X/Z axes come from the
+renderer's convention, not from the game. It works when an actor turned 90 degrees in
+Blender faces the same way in the game.
+
+**2. Grow the instance list**, so the editor can add and delete actors. First action:
+duplicate one Distressed Gobbo in `MAP` and launch. The instance count, the sections
+around it and the loader's cursor arithmetic say what else has to change. It works when
+two Gobbos stand where there was one, and the survey stays clean.
+
+**3. Decode more actor opcodes.** The model link is confirmed in game, and the entry
 walk resolves 2,041 instances. The 1,164 it cannot finish stop mostly at opcodes 121,
 16, 57, 254, 126, 73, 19, 35 and 79 (`tools/survey.py` counts the walks that finish). First
 action: disassemble those handlers from the table at file offset `0xaf340` and add the
@@ -214,6 +232,7 @@ croc2/          format library
   level.py      MAP placements + TRAK meshes -> world mesh, textured OBJ export;
                 which model and animations each placed instance uses
   vm.py         the actor bytecode opcodes decoded so far; runs an entry to its model
+  editing.py    applies tile and actor moves to a WAD and checks the result
   png.py        stdlib-only PNG writer for texture pages
   paths.py      where the game data lives
 tools/          roundtrip, survey, render_level, render3d, mod_menu, wadinfo,
@@ -223,6 +242,8 @@ tools/          roundtrip, survey, render_level, render3d, mod_menu, wadinfo,
                 mapwalk and stpcwalk (report whether the library's walks consume
                 their chunk exactly), zones (surveys the MAP zone records),
                 mod_zone (fog test), mod_actor (moves objects, spawn included)
+blender/        the editor: croc2_editor (the add-on), start.py (launcher),
+                test_editor.py (headless import/save/read-back test)
 game/pristine/  verified untouched disc copy
 game/cd/        what the game reads
 game/backup/    original save file
@@ -232,6 +253,21 @@ shots/          exported OBJ and renders
 ```
 
 ## Usage
+
+The editor:
+
+```sh
+BLENDER=/Applications/Blender.app/Contents/MacOS/Blender
+$BLENDER --python blender/start.py -- t1l1m001      # open Sailor Village to edit
+$BLENDER -b --factory-startup --python blender/test_editor.py -- t1l1m001 --render
+```
+
+Move or turn tiles and actors, then use **Save to Game** in the sidebar's Croc 2 tab
+(press N). The level is read from `game/cd/Wads`, so saves carry over between sessions;
+**Revert Game Copy to Original** puts the pristine file back. Tiles save in quarter
+turns, and only transforms are saved; mesh edits are ignored.
+
+The command-line tools:
 
 ```sh
 python3 tools/roundtrip.py              # byte-exact round-trip over every WAD

@@ -11,9 +11,15 @@ Confirmed layout so far::
         uint32 flags               # only 0 or 1 observed
 
 After the tile array comes a sequence of further sections, transcribed from the loader
-``FUN_00422020`` by :func:`walk_sections`. Two of them are decoded: the environment
-zones and the actor instances. The rest is kept as an opaque blob so edits stay
-byte-exact.
+``FUN_00422020`` by :func:`walk_sections`. Three of them are decoded: the environment
+zones, the actor instances, and a second copy of every tile's transform in fixed point
+(``TILE_COPY_STRUCT``). The rest is kept as an opaque blob so edits stay byte-exact.
+
+The copy is ``int32 rot_x, rot_y, rot_z, x, y, -z`` with positions in 20.12, and it
+agrees with the float array on all 34,650 tiles in the game, rot_y being the tile's
+rotation and the other two zero. Lifting the floats alone moves what is drawn, so the
+copy is presumably what something else - collision - reads; ``to_bytes`` regenerates it
+from the floats so a moved tile stays one tile.
 
 Locating the later sections needs the vertex count of every TRAK model, because one
 section's size depends on them, and the level's WFPC word, because four sections are
@@ -26,7 +32,9 @@ import struct
 from dataclasses import dataclass, field
 
 TILE_STRUCT = struct.Struct("<3f3I")
+TILE_COPY_STRUCT = struct.Struct("<6i")
 HEADER_STRUCT = struct.Struct("<3I")
+FIXED = 4096.0
 
 ROT_STEP = 0x400  # a quarter turn
 
@@ -47,6 +55,11 @@ class Tile:
     def to_bytes(self) -> bytes:
         return TILE_STRUCT.pack(self.x, self.y, self.z,
                                 self.rotation, self.model_id, self.flags)
+
+    def copy_bytes(self) -> bytes:
+        """The fixed-point copy of this tile's transform that follows the zones."""
+        return TILE_COPY_STRUCT.pack(0, self.rotation, 0, round(self.x * FIXED),
+                                     round(self.y * FIXED), round(-self.z * FIXED))
 
 
 ZONE_SIZE = 90  # 92 bytes once the loader scatters it into its struct
@@ -224,6 +237,11 @@ class ActorInstance:
         range appears here.
         """
         return self.word(0x00), self.word(0x04), self.word(0x08)
+
+    @rotation.setter
+    def rotation(self, xyz: tuple[int, int, int]) -> None:
+        for mem_off, value in zip((0x00, 0x04, 0x08), xyz):
+            self.set_word(mem_off, value % 0x1000)
 
     @property
     def degrees(self) -> tuple[float, float, float]:
@@ -417,6 +435,7 @@ class MapChunk:
     instances: list[ActorInstance] = field(default_factory=list)
 
     instances_at: int = -1  # where the actor instances start within rest
+    tile_copy_at: int = -1  # where the fixed-point tile copy starts within rest
 
     @classmethod
     def parse(cls, data: bytes, vertex_counts: list[int] | None = None,
@@ -434,6 +453,7 @@ class MapChunk:
         rest = data[end:]
         zones, at = cls._zones(rest)
         chunk = cls(grid_x, grid_z, tiles, zones, rest, at)
+        chunk.tile_copy_at = chunk._find_tile_copy()
         if vertex_counts is not None:
             chunk._parse_instances(data, end, vertex_counts, wfpc)
         return chunk
@@ -451,6 +471,23 @@ class MapChunk:
                 data[at + i * INSTANCE_SIZE:at + (i + 1) * INSTANCE_SIZE]))
             for i in range(out["n_instances"])
         ]
+
+    def _find_tile_copy(self) -> int:
+        """Past the zones, section C, the 256-byte block and the grid; -1 if it is not
+        there or does not match the tiles, so an unexpected layout is never rewritten."""
+        if self.zones_at < 0:
+            return -1
+        try:
+            at = self.zones_at + len(self.zones) * ZONE_SIZE
+            at += 4 + struct.unpack_from("<I", self.rest, at)[0] * SECTION_C
+            at += 256 + self.grid_x * self.grid_z * 4
+            size = len(self.tiles) * TILE_COPY_STRUCT.size
+            stored = self.rest[at:at + size]
+        except struct.error:
+            return -1
+        if stored != b"".join(t.copy_bytes() for t in self.tiles):
+            return -1
+        return at
 
     @staticmethod
     def _zones(rest: bytes) -> tuple[list[Zone], int]:
@@ -480,6 +517,10 @@ class MapChunk:
             for i, zone in enumerate(self.zones):
                 at = self.zones_at + i * ZONE_SIZE
                 rest[at:at + ZONE_SIZE] = zone.raw
+        if self.tile_copy_at >= 0:
+            at = self.tile_copy_at
+            rest[at:at + len(self.tiles) * TILE_COPY_STRUCT.size] = b"".join(
+                t.copy_bytes() for t in self.tiles)
         if self.instances_at >= 0:
             for i, inst in enumerate(self.instances):
                 at = self.instances_at + i * INSTANCE_SIZE

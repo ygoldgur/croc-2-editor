@@ -27,9 +27,12 @@ class Level:
 
     @classmethod
     def load(cls, path) -> "Level":
-        wad = Wad.read(path)
+        return cls.from_wad(Wad.read(path))
+
+    @classmethod
+    def from_wad(cls, wad: Wad) -> "Level":
         if not wad.is_level:
-            raise ValueError(f"{path} is not a level wad")
+            raise ValueError(f"{wad.path or 'wad'} is not a level wad")
         trak = TrakChunk.parse(wad.get("TRAK").payload)
         wfpc_chunk = wad.get("WFPC")
         wfpc = struct.unpack("<I", wfpc_chunk.payload)[0] if wfpc_chunk else 0

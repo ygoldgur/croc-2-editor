@@ -83,8 +83,8 @@ uint32 n, n * 90 bytes                  environment zones - see below (92 in mem
 uint32 n, n * 30 bytes                  40-byte struct in memory; actor instances
                                         index into it
 256 bytes                               fixed: 32 pairs of uint32
-grid_x * grid_z * uint32                one word per grid cell
-tile_count * 24 bytes
+grid_x * grid_z * uint32                one word per grid cell; values 0-6, not tile indices
+tile_count * 24 bytes                   the tiles again, in fixed point (below)
 tile_count * uint32                     a TRAK model index per tile
 [0x10000]  uint32 n, n * 20 bytes       section D; pairs with the flagged tiles
 per tile: vertex colours               see below
@@ -94,6 +94,15 @@ uint32 n, uint32, n * 58 bytes          the actor instances - see below (64 in m
 [0x10]     uint32
 uint16                                  final field
 ```
+
+The second tile array repeats each tile's transform as `int32 rot_x, rot_y, rot_z, x,
+y, -z`, with positions in 20.12 fixed point. `rot_y` is the tile's rotation, and the
+other two are zero. It agrees with the float array exactly on all 34,650 tiles in the
+75 levels. Lifting the float copy alone moved what the game drew (the main-menu test),
+so the floats are what is rendered; the fixed copy is presumably what collision reads.
+That has not been tested. `MapChunk.to_bytes` regenerates the copy from the floats, so
+an edited tile stays consistent. The word per grid cell holds only the values 0 to 6,
+so it is a per-cell class of some kind, not an index of the tile that fills the cell.
 
 The per-tile vertex colours are the one data-dependent part. A row is one `uint32` per
 vertex of that tile's model, with the vertex count read from the `TRAK` model header at
